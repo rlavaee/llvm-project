@@ -315,13 +315,15 @@ bool BasicBlockSections::runOnMachineFunction(MachineFunction &MF) {
             MF.getName());
     if (!HasProfile)
       return true;
-    // TODO: Apply the path cloning profile.
     for (const BBProfile<ProfileBBID> &BBP : RawProfile.RawBBProfiles) {
-      assert(!BBP.BasicBlockID.CloneID && "Path cloning is not supported yet.");
-      BBProfilesByBBID.try_emplace(BBP.BasicBlockID.BBID,
-                                   BBProfile<unsigned>{BBP.BasicBlockID.BBID,
-                                                       BBP.ClusterID,
-                                                       BBP.PositionInCluster});
+      // TODO: Apply the path cloning profile.
+      assert(!BBP.BasicBlockID.CloneID && "Path cloning is not supported yet");
+      const auto [I, Inserted] = BBProfilesByBBID.try_emplace(
+          BBP.BasicBlockID.BBID,
+          BBProfile<unsigned>{BBP.BasicBlockID.BBID, BBP.ClusterID,
+                              BBP.PositionInCluster});
+      (void)I;
+      assert(Inserted && "Duplicate BBID found in profile");
     }
   }
 

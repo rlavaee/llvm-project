@@ -85,18 +85,39 @@ BasicBlockSectionsProfileReader::getRawProfileForFunction(
 // clone basic blocks along a path. The cloned blocks are then specified in the
 // cluster information.
 // The following profile lists two cloning paths (starting with 'p') for
-// function bar and places the total 11 blocks within two clusters. Each cloned
+// function bar and places the total 9 blocks within two clusters. Each cloned
 // block is identified by its original block id, along with its clone id. A
-// block cloned multiple times (2 in this example) appears with distinct clone
-// ids (2.1 and 2.2).
-// ---------------------------
+// block cloned multiple times appears with distinct clone ids. The CFG for bar
+// is shown below before and after cloning with final clusters labeled.
 //
 // f main
 // f bar
-// p 1 2 3
-// p 4 2 5
-// c 2 3 5 6 7
-// c 1 2.1 3.1 4 2.2 5.1
+// p 1 3 4
+// p 4 2
+// c 1 3.1 4.1 6
+// c 0 2 3 4 2.1 5
+// ****************************************************************************
+// function bar before and after cloning with basic block clusters shown.
+// ****************************************************************************
+//                                ....      ..............
+//      0 -------+                : 0 :---->: 1 ---> 3.1 :
+//      |        |                : | :     :........ |  :
+//      v        v                : v :             : v  :
+// +--> 2 --> 5  1     ~~~~~~~>   : 2 :             : 4.1: clsuter 1
+// |    |        |                : | :             : |  :
+// |    v        |                : v .......       : v  :
+// |    3 <------+                : 3 <--+  :       : 6  :
+// |    |                         : |    |  :       :....:
+// |    v                         : v    |  :
+// +--- 4 ---> 6                  : 4    |  :
+//                                : |    |  :
+//                                : v    |  :
+//                                :2.1---+  : cluster 2
+//                                : | ......:
+//                                : v :
+//                                : 5 :
+//                                ....
+// ****************************************************************************
 Error BasicBlockSectionsProfileReader::ReadV1Profile() {
   auto FI = RawProgramProfile.end();
 
@@ -121,7 +142,7 @@ Error BasicBlockSectionsProfileReader::ReadV1Profile() {
     S.split(Values, ' ');
     switch (Specifier) {
     case '@':
-      break;
+      continue;
     case 'm': // Module name speicifer.
       if (Values.size() != 1) {
         return createProfileParseError(Twine("invalid module name value: '") +
@@ -169,7 +190,7 @@ Error BasicBlockSectionsProfileReader::ReadV1Profile() {
       // Skip the profile when we the profile iterator (FI) refers to the
       // past-the-end element.
       if (FI == RawProgramProfile.end())
-        break;
+        continue;
       // Reset current cluster position.
       CurrentPosition = 0;
       for (auto BasicBlockIDStr : Values) {
@@ -210,6 +231,7 @@ Error BasicBlockSectionsProfileReader::ReadV1Profile() {
       return createProfileParseError(Twine("invalid specifier: '") +
                                      Twine(Specifier) + "'");
     }
+    llvm_unreachable("should not break from this switch statement");
   }
   return Error::success();
 }
