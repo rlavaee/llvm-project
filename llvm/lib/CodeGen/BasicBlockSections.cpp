@@ -77,8 +77,11 @@
 #include "llvm/CodeGen/Passes.h"
 #include "llvm/CodeGen/TargetInstrInfo.h"
 #include "llvm/InitializePasses.h"
+#include "llvm/Support/Error.h"
+#include "llvm/Support/WithColor.h"
 #include "llvm/Target/TargetMachine.h"
 #include <optional>
+#include <sstream>
 
 using namespace llvm;
 
@@ -98,6 +101,33 @@ static cl::opt<bool> BBSectionsDetectSourceDrift(
     cl::init(true), cl::Hidden);
 
 namespace {
+
+MachineBasicBlock *CloneMachineBasicBlock(MachineBasicBlock *MBB) {
+  auto &MF = *MBB->getParent();
+  auto TII = MF.getSubtarget().getInstrInfo();
+
+  auto CloneBB = MF.CreateMachineBasicBlock(MBB->getBasicBlock());
+  MF.push_back(CloneBB);
+  // Copy the instructions.
+  for (auto &I : MBB->instrs())
+    CloneBB->push_back(MF.CloneMachineInstr(&I));
+
+  // Add the successors of the original block as the new block's successors.
+  for (auto SI = MBB->succ_begin(), SE = MBB->succ_end(); SI != SE; ++SI)
+    CloneBB->copySuccessor(MBB, SI);
+
+  if (auto FT = MBB->getFallThrough(/*JumpToFallThrough=*/false)) {
+    // The original block has an implicit fall through.
+    // Insert an explicit unconditional jump from the cloned block to the
+    // fallthrough block.
+    TII->insertUnconditionalBranch(*CloneBB, FT, CloneBB->findBranchDebugLoc());
+  }
+
+  for (auto &LiveIn : MBB->liveins())
+    CloneBB->addLiveIn(LiveIn);
+
+  return CloneBB;
+}
 
 class BasicBlockSections : public MachineFunctionPass {
 public:
@@ -285,6 +315,125 @@ static bool hasInstrProfHashMismatch(MachineFunction &MF) {
   return false;
 }
 
+// Returns `Error::success` if we can legally apply all clonings specified in
+// `ClonePaths`, and `Error` otherwise.
+static Error
+CheckValidCloning(const MachineFunction &MF,
+                  const SmallVector<SmallVector<unsigned>> &ClonePaths) {
+  // Map from the final BB IDs to the `MachineBasicBlock`s.
+  DenseMap<unsigned, const MachineBasicBlock *> BBIDToBlock;
+  for (auto &BB : MF)
+    BBIDToBlock.try_emplace(*BB.getBBID(), &BB);
+
+  for (auto &ClonePath : ClonePaths) {
+    const MachineBasicBlock *PrevBB = nullptr;
+    for (size_t I = 0; I < ClonePath.size(); ++I) {
+      unsigned BBID = ClonePath[I];
+      const MachineBasicBlock *PathBB = BBIDToBlock.lookup(BBID);
+      if (!PathBB) {
+        return make_error<StringError>(Twine("no block with id ") +
+                                           Twine(BBID) + " in function " +
+                                           MF.getName(),
+                                       inconvertibleErrorCode());
+      }
+
+      if (PrevBB && !PrevBB->isSuccessor(PathBB)) {
+        return make_error<StringError>(
+            Twine("block #") + Twine(BBID) + " is not a successor of block #" +
+                Twine(*PrevBB->getBBID()) + " in function " + MF.getName(),
+            inconvertibleErrorCode());
+      }
+
+      if (I != ClonePath.size() - 1 && !PathBB->empty() &&
+          PathBB->back().isIndirectBranch()) {
+        return make_error<StringError>(
+            Twine("block #") + Twine(BBID) +
+                " has indirect branch can only appear as the last block of the "
+                "path, in function " +
+                MF.getName(),
+            inconvertibleErrorCode());
+      }
+      PrevBB = PathBB;
+    }
+  }
+  return Error::success();
+}
+
+// Applies all clonings specified in `ClonePaths` to `MF` and returns a map
+// from `ProfileBBID`s of all clone blocks to their BBIDs (assigned by
+// `MachineFunction`).
+static DenseMap<ProfileBBID, unsigned>
+ApplyCloning(MachineFunction &MF,
+             const SmallVector<SmallVector<unsigned>> &ClonePaths) {
+  DenseMap<ProfileBBID, unsigned> CloneBBIDMap;
+  // Map from the final BB IDs to the `MachineBasicBlock`s.
+  DenseMap<unsigned, MachineBasicBlock *> BBIDToBlock;
+  for (auto &BB : MF)
+    BBIDToBlock.try_emplace(*BB.getBBID(), &BB);
+
+  DenseMap<unsigned, unsigned> NClonesForBBID;
+  auto TII = MF.getSubtarget().getInstrInfo();
+  for (const auto &ClonePath : ClonePaths) {
+
+    MachineBasicBlock *PrevBB = nullptr;
+    for (unsigned BBID : ClonePath) {
+      MachineBasicBlock *OrigBB = BBIDToBlock.at(BBID);
+      if (PrevBB == nullptr) {
+        if (auto FT = OrigBB->getFallThrough(/*JumpToFallThrough=*/false)) {
+          // Make fallthroughs explicit since we may change the layout.
+          TII->insertUnconditionalBranch(*OrigBB, FT,
+                                         OrigBB->findBranchDebugLoc());
+        }
+        PrevBB = OrigBB;
+        continue;
+      }
+
+      MachineBasicBlock *CloneBB = CloneMachineBasicBlock(OrigBB);
+
+      CloneBBIDMap.try_emplace({BBID, ++NClonesForBBID[BBID]},
+                               *CloneBB->getBBID());
+      // Set up the previous block in the path to jump to the clone.
+      PrevBB->ReplaceUsesOfBlockWith(OrigBB, CloneBB);
+      PrevBB = CloneBB;
+    }
+  }
+  return CloneBBIDMap;
+}
+
+// Processes the raw input profile `RawProfile` for the given function `MF` and
+// returns the final profile (cluster information). Returns error if
+// `RawProfile` is invalid and cannot be applied (e.g., invalid cloning paths).
+//
+// Steps:
+//    1. Clones basic blocks based on `RawProfile.ClonePaths` (if not empty) and
+//       updates the CFG accordingly.
+//    2. Creates and returns the cluster profile for the final blocks (original
+//       and cloned) based on `RawProfile.RawBBProfiles`.
+static Expected<DenseMap<unsigned, BBProfile<unsigned>>>
+ProcessProfile(MachineFunction &MF, const RawFunctionProfile &RawProfile) {
+  if (auto Err = CheckValidCloning(MF, RawProfile.ClonePaths))
+    return std::move(Err);
+
+  // Apply the clonings and obtain the map from the input block ID of cloned
+  // blocks to their final BB IDs.
+  DenseMap<ProfileBBID, unsigned> CloneBBIDMap =
+      ApplyCloning(MF, RawProfile.ClonePaths);
+
+  // Map from final BB IDs to their profile information.
+  DenseMap<unsigned, BBProfile<unsigned>> BBProfileByBBID;
+  // This step creates all the necessary clones. It does not adjust the
+  // branches.
+  for (const BBProfile<ProfileBBID> &P : RawProfile.RawBBProfiles) {
+    unsigned FinalBBID = P.BasicBlockID.CloneID == 0
+                             ? P.BasicBlockID.BBID
+                             : CloneBBIDMap.at(P.BasicBlockID);
+    BBProfileByBBID.try_emplace(
+        FinalBBID,
+        BBProfile<unsigned>{FinalBBID, P.ClusterID, P.PositionInCluster});
+  }
+  return BBProfileByBBID;
+}
+
 bool BasicBlockSections::runOnMachineFunction(MachineFunction &MF) {
   auto BBSectionsType = MF.getTarget().getBBSectionsType();
   assert(BBSectionsType != BasicBlockSection::None &&
@@ -315,16 +464,18 @@ bool BasicBlockSections::runOnMachineFunction(MachineFunction &MF) {
             MF.getName());
     if (!HasProfile)
       return true;
-    for (const BBProfile<ProfileBBID> &BBP : RawProfile.RawBBProfiles) {
-      // TODO: Apply the path cloning profile.
-      assert(!BBP.BasicBlockID.CloneID && "Path cloning is not supported yet");
-      const auto [I, Inserted] = BBProfilesByBBID.try_emplace(
-          BBP.BasicBlockID.BBID,
-          BBProfile<unsigned>{BBP.BasicBlockID.BBID, BBP.ClusterID,
-                              BBP.PositionInCluster});
-      (void)I;
-      assert(Inserted && "Duplicate BBID found in profile");
+    auto BBProfilesOrErr = ProcessProfile(MF, RawProfile);
+    if (!BBProfilesOrErr) {
+      auto Err =
+          handleErrors(BBProfilesOrErr.takeError(), [&](const StringError &E) {
+            WithColor::warning()
+                << "Rejecting the BBSections profile for function "
+                << MF.getName() << " : " << E.getMessage() << "\n";
+          });
+      assert(!Err);
+      return true;
     }
+    BBProfilesByBBID = *std::move(BBProfilesOrErr);
   }
 
   MF.setBBSectionsType(BBSectionsType);
