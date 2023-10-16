@@ -40,6 +40,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "llvm/ADT/DenseMap.h"
 #include "llvm/Transforms/Utils/CodeLayout.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
@@ -298,26 +299,17 @@ struct ChainT {
   }
 
   ChainEdge *getEdge(ChainT *Other) const {
-    for (const auto &[Chain, ChainEdge] : Edges) {
-      if (Chain == Other)
-        return ChainEdge;
-    }
-    return nullptr;
+    auto I = Edges.find(Other);
+    if (I == Edges.end()) return nullptr;
+    return I->second;
   }
 
   void removeEdge(ChainT *Other) {
-    auto It = Edges.begin();
-    while (It != Edges.end()) {
-      if (It->first == Other) {
-        Edges.erase(It);
-        return;
-      }
-      It++;
-    }
+    Edges.erase(Other);
   }
 
   void addEdge(ChainT *Other, ChainEdge *Edge) {
-    Edges.push_back(std::make_pair(Other, Edge));
+    Edges.try_emplace(Other, Edge);
   }
 
   void merge(ChainT *Other, std::vector<NodeT *> MergedBlocks) {
@@ -339,7 +331,7 @@ struct ChainT {
     Nodes.clear();
     Nodes.shrink_to_fit();
     Edges.clear();
-    Edges.shrink_to_fit();
+    //Edges.shrink_to_fit();
   }
 
   // Unique chain identifier.
@@ -353,7 +345,7 @@ struct ChainT {
   // Nodes of the chain.
   std::vector<NodeT *> Nodes;
   // Adjacent chains and corresponding edges (lists of jumps).
-  std::vector<std::pair<ChainT *, ChainEdge *>> Edges;
+  DenseMap<ChainT *, ChainEdge *> Edges;
 };
 
 /// An edge in the graph representing jumps between two chains.
