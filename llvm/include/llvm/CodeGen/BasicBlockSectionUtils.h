@@ -11,6 +11,7 @@
 
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/Support/CommandLine.h"
+#include "llvm/CodeGen/MachineBasicBlock.h"
 
 namespace llvm {
 
@@ -23,7 +24,8 @@ using MachineBasicBlockComparator =
     function_ref<bool(const MachineBasicBlock &, const MachineBasicBlock &)>;
 
 void sortBasicBlocksAndUpdateBranches(MachineFunction &MF,
-                                      MachineBasicBlockComparator MBBCmp);
+                                      MachineBasicBlockComparator MBBCmp,
+                                      const DenseSet<UniqueBBID> &ExplicitJump = {});
 
 void avoidZeroOffsetLandingPad(MachineFunction &MF);
 

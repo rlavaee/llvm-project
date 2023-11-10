@@ -142,7 +142,8 @@ INITIALIZE_PASS_END(BasicBlockSections, "bbsections-prepare",
 // block in a given function to account for changes in the layout.
 static void
 updateBranches(MachineFunction &MF,
-               const SmallVector<MachineBasicBlock *> &PreLayoutFallThroughs) {
+               const SmallVector<MachineBasicBlock *> &PreLayoutFallThroughs,
+               const DenseSet<UniqueBBID> &ExplicitJumpBBIDs) {
   const TargetInstrInfo *TII = MF.getSubtarget().getInstrInfo();
   SmallVector<MachineOperand, 4> Cond;
   for (auto &MBB : MF) {
@@ -154,12 +155,12 @@ updateBranches(MachineFunction &MF,
     //        reorderd by the linker, or
     //     2- the fallthrough block is not adjacent to the block in the new
     //        order.
-    if (FTMBB && (MBB.isEndSection() || &*NextMBBI != FTMBB))
+    if (FTMBB && (MBB.isEndSection() || &*NextMBBI != FTMBB || ExplicitJumpBBIDs.contains(*MBB.getBBID())))
       TII->insertUnconditionalBranch(MBB, FTMBB, MBB.findBranchDebugLoc());
 
     // We do not optimize branches for machine basic blocks ending sections, as
     // their adjacent block might be reordered by the linker.
-    if (MBB.isEndSection())
+    if (MBB.isEndSection() || ExplicitJumpBBIDs.contains(*MBB.getBBID()))
       continue;
 
     // It might be possible to optimize branches by flipping the branch
@@ -238,7 +239,7 @@ assignSections(MachineFunction &MF,
 }
 
 void llvm::sortBasicBlocksAndUpdateBranches(
-    MachineFunction &MF, MachineBasicBlockComparator MBBCmp) {
+    MachineFunction &MF, MachineBasicBlockComparator MBBCmp, const DenseSet<UniqueBBID> &ExplicitJump) {
   [[maybe_unused]] const MachineBasicBlock *EntryBlock = &MF.front();
   SmallVector<MachineBasicBlock *> PreLayoutFallThroughs(MF.getNumBlockIDs());
   for (auto &MBB : MF)
@@ -255,7 +256,7 @@ void llvm::sortBasicBlocksAndUpdateBranches(
   // After reordering basic blocks, we must update basic block branches to
   // insert explicit fallthrough branches when required and optimize branches
   // when possible.
-  updateBranches(MF, PreLayoutFallThroughs);
+  updateBranches(MF, PreLayoutFallThroughs, ExplicitJump);
 }
 
 // If the exception section begins with a landing pad, that landing pad will
@@ -370,7 +371,7 @@ bool BasicBlockSections::handleBBSections(MachineFunction &MF) {
     return X.getNumber() < Y.getNumber();
   };
 
-  sortBasicBlocksAndUpdateBranches(MF, Comparator);
+  sortBasicBlocksAndUpdateBranches(MF, Comparator, getAnalysis<BasicBlockSectionsProfileReaderWrapperPass>().getExplicitJumpForFunction(MF.getName()));
   avoidZeroOffsetLandingPad(MF);
   return true;
 }

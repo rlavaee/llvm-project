@@ -24,6 +24,8 @@
 #include "llvm/IR/PassManager.h"
 #include "llvm/InitializePasses.h"
 #include "llvm/Pass.h"
+#include "llvm/Support/BlockFrequency.h"
+#include "llvm/Support/BranchProbability.h"
 #include "llvm/Support/Error.h"
 #include "llvm/Support/LineIterator.h"
 #include "llvm/Support/MemoryBuffer.h"
@@ -52,27 +54,10 @@ struct FunctionPathAndClusterInfo {
   // the edge a -> b (a is not cloned). The index of the path in this vector
   // determines the `UniqueBBID::CloneID` of the cloned blocks in that path.
   SmallVector<SmallVector<unsigned>> ClonePaths;
-};
-
-// Provides DenseMapInfo for UniqueBBID.
-template <> struct DenseMapInfo<UniqueBBID> {
-  static inline UniqueBBID getEmptyKey() {
-    unsigned EmptyKey = DenseMapInfo<unsigned>::getEmptyKey();
-    return UniqueBBID{EmptyKey, EmptyKey};
-  }
-  static inline UniqueBBID getTombstoneKey() {
-    unsigned TombstoneKey = DenseMapInfo<unsigned>::getTombstoneKey();
-    return UniqueBBID{TombstoneKey, TombstoneKey};
-  }
-  static unsigned getHashValue(const UniqueBBID &Val) {
-    std::pair<unsigned, unsigned> PairVal =
-        std::make_pair(Val.BaseID, Val.CloneID);
-    return DenseMapInfo<std::pair<unsigned, unsigned>>::getHashValue(PairVal);
-  }
-  static bool isEqual(const UniqueBBID &LHS, const UniqueBBID &RHS) {
-    return DenseMapInfo<unsigned>::isEqual(LHS.BaseID, RHS.BaseID) &&
-           DenseMapInfo<unsigned>::isEqual(LHS.CloneID, RHS.CloneID);
-  }
+  DenseMap<UniqueBBID, unsigned> NodeFrequency;
+  DenseMap<UniqueBBID, DenseMap<UniqueBBID, unsigned>> EdgeFrequency;
+  DenseMap<UniqueBBID, unsigned> AlignOverride;
+  DenseSet<UniqueBBID> ExplicitJump;
 };
 
 class BasicBlockSectionsProfileReader {
@@ -99,6 +84,18 @@ public:
   // Returns the path clonings for the given function.
   SmallVector<SmallVector<unsigned>>
   getClonePathsForFunction(StringRef FuncName) const;
+
+
+  BlockFrequency getBlockFrequency(StringRef FuncName, UniqueBBID BBID) const;
+
+  std::optional<unsigned> getAlignOverride(StringRef FuncName, UniqueBBID BBID) const;
+
+  bool needsExplicitJump(StringRef FuncName, UniqueBBID BBID) const;
+
+  BranchProbability getEdgeProbability(StringRef FuncName, UniqueBBID FromBBID,
+                                       UniqueBBID ToBBID) const;
+
+  DenseSet<UniqueBBID> getExplicitJumpForFunction(StringRef FuncName) const;
 
 private:
   StringRef getAliasName(StringRef FuncName) const {
@@ -206,9 +203,28 @@ public:
   SmallVector<SmallVector<unsigned>>
   getClonePathsForFunction(StringRef FuncName) const;
 
+  DenseSet<UniqueBBID> getExplicitJumpForFunction(StringRef FuncName) const;
+
   // Initializes the FunctionNameToDIFilename map for the current module and
   // then reads the profile for the matching functions.
   bool doInitialization(Module &M) override;
+
+  BlockFrequency getBlockFrequency(StringRef FuncName, UniqueBBID BBID) const {
+    return BBSPR.getBlockFrequency(FuncName, BBID);
+  }
+
+  std::optional<unsigned> getAlignOverride(StringRef FuncName, UniqueBBID BBID) const {
+    return BBSPR.getAlignOverride(FuncName, BBID);
+  }
+
+  bool needsExplicitJump(StringRef FuncName, UniqueBBID BBID) const {
+    return BBSPR.needsExplicitJump(FuncName, BBID);
+  }
+
+  BranchProbability getEdgeProbability(StringRef FuncName, UniqueBBID FromBBID,
+                                       UniqueBBID ToBBID) const {
+    return BBSPR.getEdgeProbability(FuncName, FromBBID, ToBBID);
+  }
 
   BasicBlockSectionsProfileReader &getBBSPR();
 };

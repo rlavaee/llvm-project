@@ -954,6 +954,8 @@ bool MachineBasicBlock::isSuccessor(const MachineBasicBlock *MBB) const {
 }
 
 bool MachineBasicBlock::isLayoutSuccessor(const MachineBasicBlock *MBB) const {
+  if (SectionID != MBB->getSectionID())
+    return false;
   MachineFunction::const_iterator I(this);
   return std::next(I) == MachineFunction::const_iterator(MBB);
 }

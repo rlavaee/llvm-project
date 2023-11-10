@@ -145,6 +145,9 @@ static cl::opt<RunOutliner> EnableMachineOutliner(
 // manual override.
 static cl::opt<bool> DisableCFIFixup("disable-cfi-fixup", cl::Hidden,
                                      cl::desc("Disable the CFI fixup pass"));
+static cl::opt<bool> EnableAlignForBasicBlockSections(
+    "enable-align-basic-block-sections", cl::init(false), cl::Hidden,
+    cl::desc("Enable block alignment after basic block sections pass"));
 // Enable or disable FastISel. Both options are needed, because
 // FastISel is enabled by default with -fast, and we wish to be
 // able to enable or disable fast-isel independently from -O0.
@@ -1257,6 +1260,8 @@ void TargetPassConfig::addMachinePasses() {
       addPass(llvm::createBasicBlockPathCloningPass());
     }
     addPass(llvm::createBasicBlockSectionsPass());
+    if (TM->getBBSectionsType() == llvm::BasicBlockSection::List && EnableAlignForBasicBlockSections)
+      addPass(&MachineBlockPlacementID);
   }
 
   addPostBBSections();

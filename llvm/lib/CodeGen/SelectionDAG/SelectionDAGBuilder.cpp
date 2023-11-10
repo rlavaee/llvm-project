@@ -102,6 +102,7 @@
 #include "llvm/Target/TargetOptions.h"
 #include "llvm/TargetParser/Triple.h"
 #include "llvm/Transforms/Utils/Local.h"
+#include <algorithm>
 #include <cstddef>
 #include <iterator>
 #include <limits>
@@ -133,6 +134,14 @@ static cl::opt<unsigned, true>
 static cl::opt<unsigned> SwitchPeelThreshold(
     "switch-peel-threshold", cl::Hidden, cl::init(66),
     cl::desc("Set the case probability threshold for peeling the case from a "
+             "switch statement. A value greater than 100 will void this "
+             "optimization"));
+
+static cl::opt<unsigned> SwitchPeelDiffThreshold(
+    "switch-peel-diff-threshold", cl::Hidden, cl::init(101),  // Set to 20
+    cl::desc("Set the case probability difference threshold for peeling the "
+             "top case from a switch statement. A value greater than 100 will "
+             "void this optimization "
              "switch statement. A value greater than 100 will void this "
              "optimization"));
 
@@ -11965,27 +11974,39 @@ MachineBasicBlock *SelectionDAGBuilder::peelDominantCaseCluster(
     BranchProbability &PeeledCaseProb) {
   MachineBasicBlock *SwitchMBB = FuncInfo.MBB;
   // Don't perform if there is only one cluster or optimizing for size.
-  if (SwitchPeelThreshold > 100 || !FuncInfo.BPI || Clusters.size() < 2 ||
+  bool EnableSwitchPeelByThreshold = SwitchPeelThreshold <= 100;
+  bool EnableSwitchPeelByDiffThreshold = SwitchPeelDiffThreshold <= 100;
+  if ((!EnableSwitchPeelByThreshold && !EnableSwitchPeelByDiffThreshold) || !FuncInfo.BPI || Clusters.size() < 2 ||
       TM.getOptLevel() == CodeGenOptLevel::None ||
       SwitchMBB->getParent()->getFunction().hasMinSize())
     return SwitchMBB;
 
-  BranchProbability TopCaseProb = BranchProbability(SwitchPeelThreshold, 100);
-  unsigned PeeledCaseIndex = 0;
-  bool SwitchPeeled = false;
+  SmallVector<int, 2> MaxCCIndices{-1, -1};
   for (unsigned Index = 0; Index < Clusters.size(); ++Index) {
     CaseCluster &CC = Clusters[Index];
-    if (CC.Prob < TopCaseProb)
-      continue;
-    TopCaseProb = CC.Prob;
-    PeeledCaseIndex = Index;
-    SwitchPeeled = true;
+    if (MaxCCIndices[1] == -1 || CC.Prob > Clusters[MaxCCIndices[1]].Prob) {
+      MaxCCIndices[1] = Index;
+      if (MaxCCIndices[0] == -1 ||
+          Clusters[MaxCCIndices[1]].Prob > Clusters[MaxCCIndices[0]].Prob)
+        std::swap(MaxCCIndices[0], MaxCCIndices[1]);
+    }
   }
-  if (!SwitchPeeled)
-    return SwitchMBB;
+
+  if (EnableSwitchPeelByDiffThreshold) {
+    if (FuncInfo.MF->getName().equals("_ZN5clang5Lexer3LexERNS_5TokenE"))
+      errs() << "Switch peel by diff threshold" << Clusters[MaxCCIndices[0]].Prob << " " << Clusters[MaxCCIndices[1]].Prob << "\n";
+    if (Clusters[MaxCCIndices[0]].Prob - Clusters[MaxCCIndices[1]].Prob <
+        BranchProbability(SwitchPeelDiffThreshold, 100))
+      return SwitchMBB;
+  } else {
+    if (Clusters[MaxCCIndices[0]].Prob <
+        BranchProbability(SwitchPeelThreshold, 100))
+      return SwitchMBB;
+  }
+  PeeledCaseProb = Clusters[MaxCCIndices[0]].Prob;
 
   LLVM_DEBUG(dbgs() << "Peeled one top case in switch stmt, prob: "
-                    << TopCaseProb << "\n");
+                    << PeeledCaseProb << "\n");
 
   // Record the MBB for the peeled switch statement.
   MachineFunction::iterator BBI(SwitchMBB);
@@ -11995,9 +12016,9 @@ MachineBasicBlock *SelectionDAGBuilder::peelDominantCaseCluster(
   FuncInfo.MF->insert(BBI, PeeledSwitchMBB);
 
   ExportFromCurrentBlock(SI.getCondition());
-  auto PeeledCaseIt = Clusters.begin() + PeeledCaseIndex;
+  auto PeeledCaseIt = Clusters.begin() + MaxCCIndices[0];
   SwitchWorkListItem W = {SwitchMBB, PeeledCaseIt, PeeledCaseIt,
-                          nullptr,   nullptr,      TopCaseProb.getCompl()};
+                          nullptr,   nullptr,      PeeledCaseProb.getCompl()};
   lowerWorkItem(W, SI.getCondition(), SwitchMBB, PeeledSwitchMBB);
 
   Clusters.erase(PeeledCaseIt);
@@ -12005,10 +12026,9 @@ MachineBasicBlock *SelectionDAGBuilder::peelDominantCaseCluster(
     LLVM_DEBUG(
         dbgs() << "Scale the probablity for one cluster, before scaling: "
                << CC.Prob << "\n");
-    CC.Prob = scaleCaseProbality(CC.Prob, TopCaseProb);
+    CC.Prob = scaleCaseProbality(CC.Prob, PeeledCaseProb);
     LLVM_DEBUG(dbgs() << "After scaling: " << CC.Prob << "\n");
   }
-  PeeledCaseProb = TopCaseProb;
   return PeeledSwitchMBB;
 }
 

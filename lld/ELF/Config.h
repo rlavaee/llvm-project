@@ -252,6 +252,8 @@ struct Config {
   bool ltoPGOWarnMismatch;
   bool ltoDebugPassManager;
   bool ltoEmitAsm;
+  bool ltoNewPassManager;
+  bool ltoPseudoProbeForProfiling;
   bool ltoUniqueBasicBlockSectionNames;
   bool ltoValidateAllVtablesHaveTypeInfos;
   bool ltoWholeProgramVisibility;

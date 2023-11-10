@@ -34,6 +34,7 @@
 #include "llvm/ADT/Statistic.h"
 #include "llvm/Analysis/BlockFrequencyInfoImpl.h"
 #include "llvm/Analysis/ProfileSummaryInfo.h"
+#include "llvm/CodeGen/BasicBlockSectionsProfileReader.h"
 #include "llvm/CodeGen/MBFIWrapper.h"
 #include "llvm/CodeGen/MachineBasicBlock.h"
 #include "llvm/CodeGen/MachineBlockFrequencyInfo.h"
@@ -380,6 +381,8 @@ class MachineBlockPlacement : public MachineFunctionPass {
   /// A handle to the function-wide block frequency pass.
   std::unique_ptr<MBFIWrapper> MBFI;
 
+  const BasicBlockSectionsProfileReaderWrapperPass *BBSectionsProfileReader;
+
   /// A handle to the loop info.
   MachineLoopInfo *MLI = nullptr;
 
@@ -585,8 +588,10 @@ class MachineBlockPlacement : public MachineFunctionPass {
   /// Modify the existing block placement in the function and adjust all jumps.
   void assignBlockOrder(const std::vector<const MachineBasicBlock *> &NewOrder);
 
+  void applyBlockOrder(MachineFunction &MF);
+
   /// Create a single CFG chain from the current block order.
-  void createCFGChainExtTsp();
+  void createCFGChainFromCurrentBlockOrder();
 
 public:
   static char ID; // Pass identification, replacement for typeid
@@ -610,6 +615,7 @@ public:
     AU.addRequired<MachineLoopInfo>();
     AU.addRequired<ProfileSummaryInfoWrapperPass>();
     AU.addRequired<TargetPassConfig>();
+    AU.addUsedIfAvailable<BasicBlockSectionsProfileReaderWrapperPass>();
     MachineFunctionPass::getAnalysisUsage(AU);
   }
 };
@@ -2904,15 +2910,28 @@ void MachineBlockPlacement::alignBlocks() {
   if (FunctionChain.begin() == FunctionChain.end())
     return; // Empty chain.
 
+  bool BBSections = BBSectionsProfileReader && F->hasBBSections();
+
   const BranchProbability ColdProb(1, 5); // 20%
+  BlockFrequency BBSectionsEntryFreq =
+      BBSections ? BBSectionsProfileReader
+                       ->getBlockFrequency(F->getName(), *(F->front().getBBID()))
+                 : BlockFrequency(1);
   BlockFrequency EntryFreq = MBFI->getBlockFreq(&F->front());
   BlockFrequency WeightedEntryFreq = EntryFreq * ColdProb;
   for (MachineBasicBlock *ChainBB : FunctionChain) {
     if (ChainBB == *FunctionChain.begin())
       continue;
 
-    // Don't align non-looping basic blocks. These are unlikely to execute
-    // enough times to matter in practice. Note that we'll still handle
+    std::optional<unsigned> AlignOverride = BBSections ? BBSectionsProfileReader->getAlignOverride(F->getName(), *ChainBB->getBBID()) : std::nullopt;
+    if (AlignOverride) {
+      Align AlignO = llvm::Align(*AlignOverride);
+      ChainBB->setAlignment(AlignO, *AlignOverride);
+      if (F->getAlignment() < AlignO)
+        F->setAlignment(AlignO);
+      continue;
+    }
+
     // unnatural CFGs inside of a natural outer loop (the common case) and
     // rotated loops.
     MachineLoop *L = MLI->getLoopFor(ChainBB);
@@ -2942,21 +2961,31 @@ void MachineBlockPlacement::alignBlocks() {
 
     // Use max of the TLIAlign and MDAlign
     const Align LoopAlign = std::max(TLIAlign, Align(MDAlign));
+    const struct Align BBSectionsAlign = llvm::Align(LoopAlign.value() << 1);
     if (LoopAlign == 1)
       continue; // Don't care about loop alignment.
 
     // If the block is cold relative to the function entry don't waste space
     // aligning it.
     BlockFrequency Freq = MBFI->getBlockFreq(ChainBB);
-    if (Freq < WeightedEntryFreq)
+    BlockFrequency BBSectionsFreq =
+        BBSections ? BBSectionsProfileReader
+                         ->getBlockFrequency(F->getName(), *ChainBB->getBBID())
+                   : BlockFrequency(0);
+    if (BBSectionsFreq.getFrequency() != 0) {
+      if (BBSectionsFreq < BBSectionsEntryFreq * ColdProb)
+        continue;
+    } else if (Freq < WeightedEntryFreq) {
       continue;
+    }
 
     // If the block is cold relative to its loop header, don't align it
     // regardless of what edges into the block exist.
     MachineBasicBlock *LoopHeader = L->getHeader();
     BlockFrequency LoopHeaderFreq = MBFI->getBlockFreq(LoopHeader);
-    if (Freq < (LoopHeaderFreq * ColdProb))
+    if (BBSectionsFreq.getFrequency() == 0 && Freq < (LoopHeaderFreq * ColdProb)) {
       continue;
+    }
 
     // If the global profiles indicates so, don't align it.
     if (llvm::shouldOptimizeForSize(ChainBB, PSI, MBFI.get()) &&
@@ -2981,10 +3010,26 @@ void MachineBlockPlacement::alignBlocks() {
     // Force alignment if all the predecessors are jumps. We already checked
     // that the block isn't cold above.
     if (!LayoutPred->isSuccessor(ChainBB)) {
-      ChainBB->setAlignment(LoopAlign);
+      if (BBSections) {
+        if (BBSectionsFreq.getFrequency() != 0 && BBSectionsFreq >= BBSectionsEntryFreq * ColdProb) {
+          errs() << "Aligned with BB sections profile 1\t" << F->getName() << " " << ChainBB->getBBID()->BaseID << "\n";
+        } else {
+          errs() << "Aligned with PGO profile 1\n";
+        }
+      }
+      if (BBSectionsFreq.getFrequency() != 0 && BBSectionsFreq >= BBSectionsEntryFreq * ColdProb) {
+        ChainBB->setAlignment(BBSectionsAlign);
+      } else {
+        ChainBB->setAlignment(LoopAlign);
+      }
       DetermineMaxAlignmentPadding();
       continue;
     }
+
+    BlockFrequency BBSectionsLayoutPredFreq =
+        BBSections ? BBSectionsProfileReader
+                         ->getBlockFrequency(F->getName(), *LayoutPred->getBBID())
+                   : BlockFrequency(0);
 
     // Align this block if the layout predecessor's edge into this block is
     // cold relative to the block. When this is true, other predecessors make up
@@ -2992,12 +3037,34 @@ void MachineBlockPlacement::alignBlocks() {
     // important.
     BranchProbability LayoutProb =
         MBPI->getEdgeProbability(LayoutPred, ChainBB);
+    BranchProbability BBSectionsLayoutProb =
+        BBSections
+            ? BBSectionsProfileReader->getEdgeProbability(
+                  F->getName(), *LayoutPred->getBBID(), *ChainBB->getBBID())
+            : BranchProbability();
     BlockFrequency LayoutEdgeFreq = MBFI->getBlockFreq(LayoutPred) * LayoutProb;
-    if (LayoutEdgeFreq <= (Freq * ColdProb)) {
+    BlockFrequency BBSectionsLayoutEdgeFreq =
+        BBSectionsLayoutProb.isUnknown()
+            ? BlockFrequency(0)
+            : BBSectionsLayoutPredFreq * BBSectionsLayoutProb;
+    if (BBSectionsFreq.getFrequency() != 0) {
+      if (BBSectionsLayoutEdgeFreq <= (BBSectionsFreq * ColdProb)) {
+        errs() << "Aligned with BB sections profile 2\t" << F->getName() << " " << ChainBB->getBBID()->BaseID << "\n";
+        ChainBB->setAlignment(BBSectionsAlign);
+        DetermineMaxAlignmentPadding();
+      }
+    } else if (LayoutEdgeFreq <= (Freq * ColdProb)) {
+      if (BBSections) {
+        errs() << "Aligned with PGO profile 2\n";
+      }
       ChainBB->setAlignment(LoopAlign);
       DetermineMaxAlignmentPadding();
     }
   }
+  if (F->getName().equals("_ZN5clang5Lexer3LexERNS_5TokenE"))
+    for (auto &BB: *F) {
+      errs() << "ALIGN: BB#" << BB.getBBID()->BaseID << " " << BB.getAlignment().value() << " " << BB.getMaxBytesForAlignment() << "\n";
+    }
 }
 
 /// Tail duplicate \p BB into (some) predecessors if profitable, repeating if
@@ -3379,6 +3446,7 @@ bool MachineBlockPlacement::runOnMachineFunction(MachineFunction &MF) {
   TLI = MF.getSubtarget().getTargetLowering();
   MPDT = nullptr;
   PSI = &getAnalysis<ProfileSummaryInfoWrapperPass>().getPSI();
+  BBSectionsProfileReader = getAnalysisIfAvailable<BasicBlockSectionsProfileReaderWrapperPass>();
 
   initDupThreshold();
 
@@ -3391,6 +3459,73 @@ bool MachineBlockPlacement::runOnMachineFunction(MachineFunction &MF) {
   assert(ComputedEdges.empty() &&
          "Computed Edge map should be empty before starting placement.");
 
+  if (!MF.hasBBSections()) {
+    applyBlockOrder(MF);
+
+    // Apply a post-processing optimizing block placement.
+    if (MF.size() >= 3 && EnableExtTspBlockPlacement &&
+        (ApplyExtTspWithoutProfile || MF.getFunction().hasProfileData())) {
+      // Find a new placement and modify the layout of the blocks in the
+      // function.
+      applyExtTsp();
+
+      // Re-create CFG chain so that we can optimizeBranches and alignBlocks.
+      createCFGChainFromCurrentBlockOrder();
+    }
+    optimizeBranches();
+  } else {
+    createCFGChainFromCurrentBlockOrder();
+    // Reset alignment for all blocks.
+    for (MachineBasicBlock &MBB : MF)
+      MBB.setAlignment(Align(1));
+  }
+
+  alignBlocks();
+
+  BlockToChain.clear();
+  ComputedEdges.clear();
+  ChainAllocator.DestroyAll();
+
+  bool HasMaxBytesOverride =
+      MaxBytesForAlignmentOverride.getNumOccurrences() > 0;
+
+  if (AlignAllBlock)
+    // Align all of the blocks in the function to a specific alignment.
+    for (MachineBasicBlock &MBB : MF) {
+      if (HasMaxBytesOverride)
+        MBB.setAlignment(Align(1ULL << AlignAllBlock),
+                         MaxBytesForAlignmentOverride);
+      else
+        MBB.setAlignment(Align(1ULL << AlignAllBlock));
+    }
+  else if (AlignAllNonFallThruBlocks) {
+    // Align all of the blocks that have no fall-through predecessors to a
+    // specific alignment.
+    for (auto MBI = std::next(MF.begin()), MBE = MF.end(); MBI != MBE; ++MBI) {
+      auto LayoutPred = std::prev(MBI);
+      if (!LayoutPred->isSuccessor(&*MBI)) {
+        if (HasMaxBytesOverride)
+          MBI->setAlignment(Align(1ULL << AlignAllNonFallThruBlocks),
+                            MaxBytesForAlignmentOverride);
+        else
+          MBI->setAlignment(Align(1ULL << AlignAllNonFallThruBlocks));
+      }
+    }
+  }
+  if (ViewBlockLayoutWithBFI != GVDT_None &&
+      (ViewBlockFreqFuncName.empty() ||
+       F->getFunction().getName().equals(ViewBlockFreqFuncName))) {
+    if (RenumberBlocksBeforeView)
+      MF.RenumberBlocks();
+    MBFI->view("MBP." + MF.getName(), false);
+  }
+
+  // We always return true as we have no way to track whether the final order
+  // differs from the original order.
+  return true;
+}
+
+void MachineBlockPlacement::applyBlockOrder(MachineFunction &MF) {
   unsigned TailDupSize = TailDupPlacementThreshold;
   // If only the aggressive threshold is explicitly set, use it.
   if (TailDupPlacementAggressiveThreshold.getNumOccurrences() != 0 &&
@@ -3454,61 +3589,6 @@ bool MachineBlockPlacement::runOnMachineFunction(MachineFunction &MF) {
       buildCFGChains();
     }
   }
-
-  // Apply a post-processing optimizing block placement.
-  if (MF.size() >= 3 && EnableExtTspBlockPlacement &&
-      (ApplyExtTspWithoutProfile || MF.getFunction().hasProfileData())) {
-    // Find a new placement and modify the layout of the blocks in the function.
-    applyExtTsp();
-
-    // Re-create CFG chain so that we can optimizeBranches and alignBlocks.
-    createCFGChainExtTsp();
-  }
-
-  optimizeBranches();
-  alignBlocks();
-
-  BlockToChain.clear();
-  ComputedEdges.clear();
-  ChainAllocator.DestroyAll();
-
-  bool HasMaxBytesOverride =
-      MaxBytesForAlignmentOverride.getNumOccurrences() > 0;
-
-  if (AlignAllBlock)
-    // Align all of the blocks in the function to a specific alignment.
-    for (MachineBasicBlock &MBB : MF) {
-      if (HasMaxBytesOverride)
-        MBB.setAlignment(Align(1ULL << AlignAllBlock),
-                         MaxBytesForAlignmentOverride);
-      else
-        MBB.setAlignment(Align(1ULL << AlignAllBlock));
-    }
-  else if (AlignAllNonFallThruBlocks) {
-    // Align all of the blocks that have no fall-through predecessors to a
-    // specific alignment.
-    for (auto MBI = std::next(MF.begin()), MBE = MF.end(); MBI != MBE; ++MBI) {
-      auto LayoutPred = std::prev(MBI);
-      if (!LayoutPred->isSuccessor(&*MBI)) {
-        if (HasMaxBytesOverride)
-          MBI->setAlignment(Align(1ULL << AlignAllNonFallThruBlocks),
-                            MaxBytesForAlignmentOverride);
-        else
-          MBI->setAlignment(Align(1ULL << AlignAllNonFallThruBlocks));
-      }
-    }
-  }
-  if (ViewBlockLayoutWithBFI != GVDT_None &&
-      (ViewBlockFreqFuncName.empty() ||
-       F->getFunction().getName().equals(ViewBlockFreqFuncName))) {
-    if (RenumberBlocksBeforeView)
-      MF.RenumberBlocks();
-    MBFI->view("MBP." + MF.getName(), false);
-  }
-
-  // We always return true as we have no way to track whether the final order
-  // differs from the original order.
-  return true;
 }
 
 void MachineBlockPlacement::applyExtTsp() {
@@ -3631,7 +3711,7 @@ void MachineBlockPlacement::assignBlockOrder(
 #endif
 }
 
-void MachineBlockPlacement::createCFGChainExtTsp() {
+void MachineBlockPlacement::createCFGChainFromCurrentBlockOrder() {
   BlockToChain.clear();
   ComputedEdges.clear();
   ChainAllocator.DestroyAll();

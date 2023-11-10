@@ -21,6 +21,8 @@
 #include "llvm/ADT/StringRef.h"
 #include "llvm/IR/DebugInfoMetadata.h"
 #include "llvm/Pass.h"
+#include "llvm/Support/BlockFrequency.h"
+#include "llvm/Support/BranchProbability.h"
 #include "llvm/Support/Error.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/LineIterator.h"
@@ -73,6 +75,50 @@ SmallVector<SmallVector<unsigned>>
 BasicBlockSectionsProfileReader::getClonePathsForFunction(
     StringRef FuncName) const {
   return ProgramPathAndClusterInfo.lookup(getAliasName(FuncName)).ClonePaths;
+}
+
+DenseSet<UniqueBBID> BasicBlockSectionsProfileReader::getExplicitJumpForFunction(StringRef FuncName) const {
+  auto R = ProgramPathAndClusterInfo.find(getAliasName(FuncName));
+  return R != ProgramPathAndClusterInfo.end() ? R->second.ExplicitJump : DenseSet<UniqueBBID>();
+}
+
+std::optional<unsigned> BasicBlockSectionsProfileReader::getAlignOverride(StringRef FuncName, UniqueBBID BBID) const {
+  auto R = ProgramPathAndClusterInfo.find(getAliasName(FuncName));
+  if (R == ProgramPathAndClusterInfo.end())
+    return std::nullopt;
+  auto Align = R->second.AlignOverride.lookup(BBID);
+  return Align ? std::optional<unsigned>(Align) : std::nullopt;
+}
+
+bool BasicBlockSectionsProfileReader::needsExplicitJump(StringRef FuncName, UniqueBBID BBID) const {
+  auto R = ProgramPathAndClusterInfo.find(getAliasName(FuncName));
+  if (R == ProgramPathAndClusterInfo.end())
+    return false;
+  return R->second.ExplicitJump.contains(BBID);
+}
+
+
+
+BlockFrequency BasicBlockSectionsProfileReader::getBlockFrequency(
+    StringRef FuncName, UniqueBBID BBID) const {
+  auto R = ProgramPathAndClusterInfo.find(getAliasName(FuncName));
+  if (R == ProgramPathAndClusterInfo.end())
+    return BlockFrequency();
+  return BlockFrequency(R->second.NodeFrequency.lookup(BBID));
+}
+
+BranchProbability BasicBlockSectionsProfileReader::getEdgeProbability(
+    StringRef FuncName, UniqueBBID FromBBID, UniqueBBID ToBBID) const {
+  auto R = ProgramPathAndClusterInfo.find(getAliasName(FuncName));
+  if (R == ProgramPathAndClusterInfo.end())
+    return BranchProbability();
+  unsigned FromFreq = R->second.NodeFrequency.lookup(FromBBID);
+  if (FromFreq == 0)
+    return BranchProbability();
+  auto EdgesFrom = R->second.EdgeFrequency.lookup(FromBBID);
+  if (EdgesFrom.empty())
+    return BranchProbability(0, FromFreq);
+  return BranchProbability(EdgesFrom.lookup(ToBBID), FromFreq);
 }
 
 // Reads the version 1 basic block sections profile. Profile for each function
@@ -239,6 +285,64 @@ Error BasicBlockSectionsProfileReader::ReadV1Profile() {
       }
       continue;
     }
+    case 'g': { // CFG profile
+      // Skip the profile when we the profile iterator (FI) refers to the
+      // past-the-end element.
+      if (FI == ProgramPathAndClusterInfo.end())
+        continue;
+      auto R = Values[0].split(/*Separator=*/':');
+      unsigned long long Freq;
+      auto SrcBBID = parseUniqueBBID(R.first);
+      if (!SrcBBID ||
+          getAsUnsignedInteger(R.second, 10, Freq))
+        return createProfileParseError("unable to read frequency profile");
+      FI->second.NodeFrequency[*SrcBBID] = Freq;
+      for (size_t I = 1; I < Values.size(); ++I) {
+        auto R = Values[I].split(/*Separator=*/':');
+        unsigned long long EdgeFreq;
+        auto SinkBBID = parseUniqueBBID(R.first);
+        if (!SinkBBID ||
+            getAsUnsignedInteger(R.second, 10, EdgeFreq))
+          return createProfileParseError("unable to read edge frequency profile");
+        FI->second.EdgeFrequency[*SrcBBID][*SinkBBID] = EdgeFreq;
+      }
+      continue;
+    }
+    case 'j': { // Explicit jump
+      // Skip the profile when we the profile iterator (FI) refers to the
+      // past-the-end element.
+      if (FI == ProgramPathAndClusterInfo.end())
+        continue;
+      // Parse explicit jump:
+      for (auto BBIDStr: Values) {
+        auto BBID = parseUniqueBBID(BBIDStr);
+        if (!BBID)
+          return createProfileParseError(Twine("unsigned integer expected: '") +
+                                             BBIDStr + "'");
+        FI->second.ExplicitJump.insert(*BBID);
+      }
+      continue;
+    }
+    case 'a': { // Basic block alignment
+      // Skip the profile when we the profile iterator (FI) refers to the
+      // past-the-end element.
+      if (FI == ProgramPathAndClusterInfo.end())
+        continue;
+      // Parse alignment
+      for (auto AlignBBIDStr : Values) {
+        auto [BBIDStr, AlignStr] = AlignBBIDStr.split(':');
+        unsigned long long Align;
+        auto BBID = parseUniqueBBID(BBIDStr);
+        if (!BBID)
+          return createProfileParseError(Twine("unsigned integer expected: '") +
+                                         BBIDStr + "'");
+        if (getAsUnsignedInteger(AlignStr, 10, Align))
+          return createProfileParseError(Twine("unsigned integer expected: '") +
+                                           AlignStr + "'");
+        FI->second.AlignOverride[*BBID]=Align;
+      }
+      continue;
+    }
     default:
       return createProfileParseError(Twine("invalid specifier: '") +
                                      Twine(Specifier) + "'");
@@ -261,6 +365,30 @@ Error BasicBlockSectionsProfileReader::ReadV0Profile() {
 
   for (; !LineIt.is_at_eof(); ++LineIt) {
     StringRef S(*LineIt);
+    if (S[0] == '#') {
+      if (FI == ProgramPathAndClusterInfo.end())
+        continue;
+      if (!S.consume_front("#cfg-prof "))
+        continue;
+      SmallVector<StringRef, 4> BlockProfile;
+      S.split(BlockProfile, ' ');
+      auto R = BlockProfile[0].split(/*Separator=*/':');
+      unsigned long long BBID, Freq;
+      if (getAsUnsignedInteger(R.first, 10, BBID) ||
+          getAsUnsignedInteger(R.second, 10, Freq))
+        return createProfileParseError("unable to read frequency profile");
+      UniqueBBID UBBID = {static_cast<unsigned>(BBID), 0};
+      FI->second.NodeFrequency[UBBID] = Freq;
+      for (size_t I = 1; I < BlockProfile.size(); ++I) {
+        auto R = BlockProfile[I].split(/*Separator=*/':');
+        unsigned long long SinkBBID, EdgeFreq;
+        if (getAsUnsignedInteger(R.first, 10, SinkBBID) ||
+            getAsUnsignedInteger(R.second, 10, EdgeFreq))
+          return createProfileParseError("unable to read edge frequency profile");
+        FI->second.EdgeFrequency[UBBID][{static_cast<unsigned>(SinkBBID), 0}] = EdgeFreq;
+      }
+      continue;
+    }
     if (S[0] == '@')
       continue;
     // Check for the leading "!"
@@ -272,6 +400,36 @@ Error BasicBlockSectionsProfileReader::ReadV0Profile() {
       // past-the-end element.
       if (FI == ProgramPathAndClusterInfo.end())
         continue;
+      if (S.consume_front("!")) {
+        if (S.consume_front("!")) {
+          // Parse explicit jump:
+          SmallVector<StringRef, 4> BBIDStrs;
+          S.split(BBIDStrs, ' ');
+          for (auto BBIDStr: BBIDStrs) {
+            unsigned long long BBID;
+            if (getAsUnsignedInteger(BBIDStr, 10, BBID))
+              return createProfileParseError(Twine("unsigned integer expected: '") +
+                                             BBIDStr + "'");
+            FI->second.ExplicitJump.insert({static_cast<unsigned>(BBID), 0});
+          }
+          continue;
+        }
+        // Parse alignment
+        SmallVector<StringRef, 4> AlignBBIDStrs;
+        S.split(AlignBBIDStrs, ' ');
+        for (auto AlignBBIDStr : AlignBBIDStrs) {
+          auto [BBIDStr, AlignStr] = AlignBBIDStr.split(':');
+          unsigned long long BBID, Align;
+          if (getAsUnsignedInteger(BBIDStr, 10, BBID))
+            return createProfileParseError(Twine("unsigned integer expected: '") +
+                                           BBIDStr + "'");
+          if (getAsUnsignedInteger(AlignStr, 10, Align))
+            return createProfileParseError(Twine("unsigned integer expected: '") +
+                                           AlignStr + "'");
+          FI->second.AlignOverride[{static_cast<unsigned>(BBID), 0}]=Align;
+        }
+        continue;
+      }
       SmallVector<StringRef, 4> BBIDs;
       S.split(BBIDs, ' ');
       // Reset current cluster position.
@@ -437,6 +595,10 @@ SmallVector<SmallVector<unsigned>>
 BasicBlockSectionsProfileReaderWrapperPass::getClonePathsForFunction(
     StringRef FuncName) const {
   return BBSPR.getClonePathsForFunction(FuncName);
+}
+
+DenseSet<UniqueBBID> BasicBlockSectionsProfileReaderWrapperPass::getExplicitJumpForFunction(StringRef FuncName) const {
+  return BBSPR.getExplicitJumpForFunction(FuncName);
 }
 
 BasicBlockSectionsProfileReader &
