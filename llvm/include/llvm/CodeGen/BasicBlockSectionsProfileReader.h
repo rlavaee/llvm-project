@@ -42,6 +42,17 @@ struct BBClusterInfo {
   unsigned PositionInCluster;
 };
 
+struct BBPosition {
+  UniqueBBID BBID;
+  unsigned BBOffset;
+};
+
+struct PrefetchHint {
+  BBPosition SitePosition;
+  StringRef TargetFunctionName;
+  BBPosition TargetPosition;
+};
+
 // This represents the raw input profile for one function.
 struct FunctionPathAndClusterInfo {
   // BB Cluster information specified by `UniqueBBID`s.
@@ -50,7 +61,10 @@ struct FunctionPathAndClusterInfo {
   // the edge a -> b (a is not cloned). The index of the path in this vector
   // determines the `UniqueBBID::CloneID` of the cloned blocks in that path.
   SmallVector<SmallVector<unsigned>> ClonePaths;
+  SmallVector<PrefetchHint> PrefetchHints;
+  DenseSet<BBPosition> PrefetchTargets;
 };
+
 
 // Provides DenseMapInfo for UniqueBBID.
 template <> struct DenseMapInfo<UniqueBBID> {
@@ -72,6 +86,26 @@ template <> struct DenseMapInfo<UniqueBBID> {
            DenseMapInfo<unsigned>::isEqual(LHS.CloneID, RHS.CloneID);
   }
 };
+
+// Provides DenseMapInfo BBPosition.
+template <> struct DenseMapInfo<BBPosition> {
+  static inline BBPosition getEmptyKey() {
+    return {DenseMapInfo<UniqueBBID>::getEmptyKey(), DenseMapInfo<unsigned>::getEmptyKey()};
+  }
+  static inline BBPosition getTombstoneKey() {
+    return BBPosition{DenseMapInfo<UniqueBBID>::getTombstoneKey(), DenseMapInfo<unsigned>::getTombstoneKey()};
+  }
+  static unsigned getHashValue(const BBPosition &Val) {
+    std::pair<unsigned, unsigned> PairVal =
+        std::make_pair(DenseMapInfo<UniqueBBID>::getHashValue(Val.BBID), Val.BBOffset);
+    return DenseMapInfo<std::pair<unsigned, unsigned>>::getHashValue(PairVal);
+  }
+  static bool isEqual(const BBPosition &LHS, const BBPosition &RHS) {
+    return DenseMapInfo<UniqueBBID>::isEqual(LHS.BBID, RHS.BBID) &&
+           DenseMapInfo<unsigned>::isEqual(LHS.BBOffset, RHS.BBOffset);
+  }
+};
+
 
 class BasicBlockSectionsProfileReader {
 public:
