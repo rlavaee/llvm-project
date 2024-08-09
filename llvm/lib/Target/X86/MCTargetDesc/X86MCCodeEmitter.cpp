@@ -883,7 +883,10 @@ PrefixKind X86MCCodeEmitter::emitPrefixImpl(unsigned &CurOp, const MCInst &MI,
   uint64_t TSFlags = MCII.get(MI.getOpcode()).TSFlags;
   // Determine where the memory operand starts, if present.
   int MemoryOperand = X86II::getMemoryOperandNo(TSFlags);
-  // Emit segment override opcode prefix as needed.
+  // MI.dump();
+  // errs() << "\n";
+  // errs() << "MemoryOperand should be: " << MemoryOperand << "\n";
+  //  Emit segment override opcode prefix as needed.
   if (MemoryOperand != -1) {
     MemoryOperand += CurOp;
     emitSegmentOverridePrefix(MemoryOperand + X86::AddrSegmentReg, MI, CB);

@@ -1067,6 +1067,7 @@ void AsmPrinter::emitFunctionEntryLabel() {
                        "' is a protected alias");
 
   OutStreamer->emitLabel(CurrentFnSym);
+  errs() << "CurrentFnSym is: " << CurrentFnSym->getName() << "\n";
 
   if (TM.getTargetTriple().isOSBinFormatELF()) {
     MCSymbol *Sym = getSymbolPreferLocal(MF->getFunction());
@@ -1738,15 +1739,33 @@ void AsmPrinter::emitFunctionBody() {
 
   bool CanDoExtraAnalysis = ORE->allowExtraAnalysis(DEBUG_TYPE);
   for (auto &MBB : *MF) {
+    int NextPrefetchTargetIndex = MBB.getPrefetchTargets().empty() ? -1 : 0;
+    unsigned NumInstsInBlock = 0;
     // Print a label for the basic block.
     emitBasicBlockStart(MBB);
     DenseMap<StringRef, unsigned> MnemonicCounts;
     for (auto &MI : MBB) {
+      if (NextPrefetchTargetIndex != -1 &&
+          NumInstsInBlock * 4 >=
+              MBB.getPrefetchTargets()[NextPrefetchTargetIndex]) {
+        MCSymbol *PrefetchTargetSymbol = OutContext.getOrCreateSymbol(
+            MF->getName() + Twine("_") + utostr(MBB.getBBID()->BaseID) +
+            Twine("_") +
+            utostr(MBB.getPrefetchTargets()[NextPrefetchTargetIndex]));
+        // errs() << "Emitting symbol: " << PrefetchTargetSymbol->getName() <<
+        // "\n";
+        OutStreamer->emitLabel(PrefetchTargetSymbol);
+        ++NextPrefetchTargetIndex;
+        if (NextPrefetchTargetIndex >=
+            static_cast<int>(MBB.getPrefetchTargets().size()))
+          NextPrefetchTargetIndex = -1;
+      }
       // Print the assembly for the instruction.
       if (!MI.isPosition() && !MI.isImplicitDef() && !MI.isKill() &&
           !MI.isDebugInstr()) {
         HasAnyRealCode = true;
         ++NumInstsInFunction;
+        ++NumInstsInBlock;
       }
 
       // If there is a pre-instruction symbol, emit a label for it here.

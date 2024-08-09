@@ -103,6 +103,12 @@ struct UniqueBBID {
   unsigned CloneID;
 };
 
+struct PrefetchTarget {
+  StringRef TargetFunction;
+  UniqueBBID TargetBBID;
+  unsigned TargetBBOffset;
+};
+
 template <> struct ilist_traits<MachineInstr> {
 private:
   friend class MachineBasicBlock; // Set by the owning MachineBasicBlock.
@@ -214,6 +220,8 @@ private:
   /// Fixed unique ID assigned to this basic block upon creation. Used with
   /// basic block sections and basic block labels.
   std::optional<UniqueBBID> BBID;
+
+  SmallVector<unsigned> PrefetchTargets;
 
   /// With basic block sections, this stores the Section ID of the basic block.
   MBBSectionID SectionID{0};
@@ -678,6 +686,14 @@ public:
   void setIsEndSection(bool V = true) { IsEndSection = V; }
 
   std::optional<UniqueBBID> getBBID() const { return BBID; }
+
+  const SmallVector<unsigned> &getPrefetchTargets() const {
+    return PrefetchTargets;
+  }
+
+  void setPrefetchTargets(const SmallVector<unsigned> &V) {
+    PrefetchTargets = V;
+  }
 
   /// Returns the section ID of this basic block.
   MBBSectionID getSectionID() const { return SectionID; }

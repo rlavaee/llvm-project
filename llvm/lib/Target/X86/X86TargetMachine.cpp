@@ -665,6 +665,8 @@ void X86PassConfig::addPreEmitPass2() {
             (M->getFunction("objc_retainAutoreleasedReturnValue") ||
              M->getFunction("objc_unsafeClaimAutoreleasedReturnValue")));
   }));
+
+  addPass(createPrefetchInsertionPass());
 }
 
 bool X86PassConfig::addPostFastRegAllocRewrite() {

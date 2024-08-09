@@ -58,6 +58,7 @@ set(sources
   X86IndirectThunks.cpp
   X86InterleavedAccess.cpp
   X86InsertPrefetch.cpp
+  PrefetchInsertion.cpp
   X86InstCombineIntrinsic.cpp
   X86InstrFMA3Info.cpp
   X86InstrFoldTables.cpp

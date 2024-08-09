@@ -316,7 +316,7 @@ bool BasicBlockSections::handleBBSections(MachineFunction &MF) {
     auto [HasProfile, ClusterInfo] =
         getAnalysis<BasicBlockSectionsProfileReaderWrapperPass>()
             .getClusterInfoForFunction(MF.getName());
-    if (!HasProfile)
+    if (!HasProfile || ClusterInfo.empty())
       return false;
     for (auto &BBClusterInfo : ClusterInfo) {
       FuncClusterInfo.try_emplace(BBClusterInfo.BBID, BBClusterInfo);

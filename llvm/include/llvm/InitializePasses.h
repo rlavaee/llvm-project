@@ -54,6 +54,7 @@ void initializeAssignmentTrackingAnalysisPass(PassRegistry &);
 void initializeAssumptionCacheTrackerPass(PassRegistry &);
 void initializeAtomicExpandLegacyPass(PassRegistry &);
 void initializeBasicBlockPathCloningPass(PassRegistry &);
+void initializePrefetchInsertionPass(PassRegistry &);
 void initializeBasicBlockSectionsProfileReaderWrapperPassPass(PassRegistry &);
 void initializeBasicBlockSectionsPass(PassRegistry &);
 void initializeBarrierNoopPass(PassRegistry &);

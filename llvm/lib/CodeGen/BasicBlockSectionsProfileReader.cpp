@@ -75,6 +75,19 @@ BasicBlockSectionsProfileReader::getClonePathsForFunction(
   return ProgramPathAndClusterInfo.lookup(getAliasName(FuncName)).ClonePaths;
 }
 
+SmallVector<PrefetchHint>
+BasicBlockSectionsProfileReader::getPrefetchHintsForFunction(
+    StringRef FuncName) const {
+  return ProgramPathAndClusterInfo.lookup(getAliasName(FuncName)).PrefetchHints;
+}
+
+DenseSet<BBPosition>
+BasicBlockSectionsProfileReader::getPrefetchTargetsForFunction(
+    StringRef FuncName) const {
+  return ProgramPathAndClusterInfo.lookup(getAliasName(FuncName))
+      .PrefetchTargets;
+}
+
 // Reads the version 1 basic block sections profile. Profile for each function
 // is encoded as follows:
 //   m <module_name>
@@ -266,9 +279,12 @@ Error BasicBlockSectionsProfileReader::ReadV1Profile() {
       if (getAsUnsignedInteger(PrefetchTargetStr[2], 10, TargetBBOffset))
         return createProfileParseError(Twine("unsigned integer expected: '") +
                                        PrefetchTargetStr[2]);
-      FI->second.PrefetchHints.push_back(PrefetchHint{
-         {*SiteBBID, static_cast<unsigned>(SiteBBOffset)}, PrefetchTargetStr[0],
-                                                           {*TargetBBID, static_cast<unsigned>(TargetBBOffset)}});
+      // errs() << "Read it " << " " << SiteBBOffset << " " <<
+      // PrefetchTargetStr[0] << " " <<TargetBBOffset << "\n";
+      FI->second.PrefetchHints.push_back(
+          PrefetchHint{{*SiteBBID, static_cast<unsigned>(SiteBBOffset)},
+                       PrefetchTargetStr[0],
+                       {*TargetBBID, static_cast<unsigned>(TargetBBOffset)}});
       continue;
     }
     default:
@@ -278,12 +294,13 @@ Error BasicBlockSectionsProfileReader::ReadV1Profile() {
     llvm_unreachable("should not break from this switch statement");
   }
   DenseMap<StringRef, DenseSet<BBPosition>> PrefetchTargets;
-  for (auto &[Function, Info]: ProgramPathAndClusterInfo) {
-    for (const auto &PrefetchHint: Info.PrefetchHints) {
-      PrefetchTargets[PrefetchHint.TargetFunctionName].insert(PrefetchHint.TargetPosition);
+  for (auto &[Function, Info] : ProgramPathAndClusterInfo) {
+    for (const auto &PrefetchHint : Info.PrefetchHints) {
+      PrefetchTargets[PrefetchHint.TargetFunctionName].insert(
+          PrefetchHint.TargetPosition);
     }
   }
-  for (const auto &[Function, BBPositions]: PrefetchTargets) {
+  for (const auto &[Function, BBPositions] : PrefetchTargets) {
     ProgramPathAndClusterInfo[Function].PrefetchTargets = BBPositions;
   }
   return Error::success();
@@ -478,6 +495,18 @@ SmallVector<SmallVector<unsigned>>
 BasicBlockSectionsProfileReaderWrapperPass::getClonePathsForFunction(
     StringRef FuncName) const {
   return BBSPR.getClonePathsForFunction(FuncName);
+}
+
+SmallVector<PrefetchHint>
+BasicBlockSectionsProfileReaderWrapperPass::getPrefetchHintsForFunction(
+    StringRef FuncName) const {
+  return BBSPR.getPrefetchHintsForFunction(FuncName);
+}
+
+DenseSet<BBPosition>
+BasicBlockSectionsProfileReaderWrapperPass::getPrefetchTargetsForFunction(
+    StringRef FuncName) const {
+  return BBSPR.getPrefetchTargetsForFunction(FuncName);
 }
 
 BasicBlockSectionsProfileReader &
