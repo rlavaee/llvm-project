@@ -136,7 +136,7 @@ bool PrefetchInsertion::runOnMachineFunction(MachineFunction &MF) {
               MF.getFunction().getParent()->getNamedValue(PrefetchTargetName);
 
           MachineInstr *PFetch = MF.CreateMachineInstr(
-              TII->get(X86::PREFETCHT1),
+              TII->get(X86::PREFETCHIT1),
               Current != BB.instr_end() ? Current->getDebugLoc() : DebugLoc(),
               true);
           MachineInstrBuilder MIB(MF, PFetch);
