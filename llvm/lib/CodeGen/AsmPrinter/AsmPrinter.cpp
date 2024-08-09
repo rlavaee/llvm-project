@@ -1067,7 +1067,6 @@ void AsmPrinter::emitFunctionEntryLabel() {
                        "' is a protected alias");
 
   OutStreamer->emitLabel(CurrentFnSym);
-  errs() << "CurrentFnSym is: " << CurrentFnSym->getName() << "\n";
 
   if (TM.getTargetTriple().isOSBinFormatELF()) {
     MCSymbol *Sym = getSymbolPreferLocal(MF->getFunction());
