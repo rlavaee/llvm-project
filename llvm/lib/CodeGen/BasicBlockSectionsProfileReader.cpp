@@ -287,21 +287,31 @@ Error BasicBlockSectionsProfileReader::ReadV1Profile() {
                        {*TargetBBID, static_cast<unsigned>(TargetBBOffset)}});
       continue;
     }
+    case 't': { // Prefetch target specifier.
+      // Skip the profile when we the profile iterator (FI) refers to the
+      // past-the-end element.
+      if (FI == ProgramPathAndClusterInfo.end())
+        continue;
+      assert(Values.size() == 1);
+      SmallVector<StringRef, 2> PrefetchTargetStr;
+      Values[0].split(PrefetchTargetStr, '@');
+      assert(PrefetchTargetStr.size() == 2);
+      auto TargetBBID = parseUniqueBBID(PrefetchTargetStr[0]);
+      if (!TargetBBID)
+        return TargetBBID.takeError();
+      unsigned long long TargetBBOffset;
+      if (getAsUnsignedInteger(PrefetchTargetStr[1], 10, TargetBBOffset))
+        return createProfileParseError(Twine("unsigned integer expected: '") +
+                                       PrefetchTargetStr[1]);
+      FI->second.PrefetchTargets.insert(BBPosition{*TargetBBID, static_cast<unsigned>(TargetBBOffset)});
+      continue;
+    }
+
     default:
       return createProfileParseError(Twine("invalid specifier: '") +
                                      Twine(Specifier) + "'");
     }
     llvm_unreachable("should not break from this switch statement");
-  }
-  DenseMap<StringRef, DenseSet<BBPosition>> PrefetchTargets;
-  for (auto &[Function, Info] : ProgramPathAndClusterInfo) {
-    for (const auto &PrefetchHint : Info.PrefetchHints) {
-      PrefetchTargets[PrefetchHint.TargetFunctionName].insert(
-          PrefetchHint.TargetPosition);
-    }
-  }
-  for (const auto &[Function, BBPositions] : PrefetchTargets) {
-    ProgramPathAndClusterInfo[Function].PrefetchTargets = BBPositions;
   }
   return Error::success();
 }
