@@ -35,6 +35,11 @@
 using namespace llvm;
 #define DEBUG_TYPE "prefetchinsertion"
 
+static cl::opt<bool> UseCodePrefetchInstruction(
+    "use-code-prefetch-instruction",
+    cl::desc("Whether to use the new prefetchit1 instruction."),
+    cl::init(false), cl::Hidden);
+
 namespace {} // end anonymous namespace
 
 namespace llvm {
@@ -139,7 +144,8 @@ bool PrefetchInsertion::runOnMachineFunction(MachineFunction &MF) {
               MF.getFunction().getParent()->getNamedValue(PrefetchTargetName);
 
           MachineInstr *PFetch = MF.CreateMachineInstr(
-              TII->get(X86::PREFETCHIT1),
+              UseCodePrefetchInstruction ? TII->get(X86::PREFETCHIT1)
+                                         : TII->get(X86::PREFETCHT1),
               Current != BB.instr_end() ? Current->getDebugLoc() : DebugLoc(),
               true);
           MachineInstrBuilder MIB(MF, PFetch);
