@@ -1259,7 +1259,6 @@ void TargetPassConfig::addMachinePasses() {
       addPass(llvm::createBasicBlockSectionsProfileReaderWrapperPass(
           TM->getBBSectionsFuncListBuf()));
       addPass(llvm::createBasicBlockPathCloningPass());
-      // addPass(llvm::createPrefetchInsertionPass());
     }
     addPass(llvm::createBasicBlockSectionsPass());
   }
