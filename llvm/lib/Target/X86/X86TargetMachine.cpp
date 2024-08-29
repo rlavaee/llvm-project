@@ -666,7 +666,8 @@ void X86PassConfig::addPreEmitPass2() {
              M->getFunction("objc_unsafeClaimAutoreleasedReturnValue")));
   }));
 
-  addPass(createPrefetchInsertionPass());
+  if (TM->getBBSectionsType() == llvm::BasicBlockSection::List)
+    addPass(createPrefetchInsertionPass());
 }
 
 bool X86PassConfig::addPostFastRegAllocRewrite() {
