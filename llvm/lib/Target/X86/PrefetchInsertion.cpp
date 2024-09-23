@@ -85,7 +85,8 @@ bool PrefetchInsertion::runOnMachineFunction(MachineFunction &MF) {
   DenseSet<BBPosition> PrefetchTargets =
       getAnalysis<BasicBlockSectionsProfileReaderWrapperPass>()
           .getPrefetchTargetsForFunction(MF.getName());
-  //errs() << "Targets: Function: " << F.getName() << " " << PrefetchTargets.size() << "\n";
+  // errs() << "Targets: Function: " << F.getName() << " " <<
+  // PrefetchTargets.size() << "\n";
   DenseMap<UniqueBBID, SmallVector<unsigned>> PrefetchTargetsByBBID;
   for (const auto &P : PrefetchTargets)
     PrefetchTargetsByBBID[P.BBID].push_back(P.BBOffset);
@@ -103,11 +104,11 @@ bool PrefetchInsertion::runOnMachineFunction(MachineFunction &MF) {
     F.getParent()->getOrInsertGlobal(PrefetchTargetName, PtrTy);
   }
 
-
   SmallVector<PrefetchHint> PrefetchHints =
       getAnalysis<BasicBlockSectionsProfileReaderWrapperPass>()
           .getPrefetchHintsForFunction(MF.getName());
-  //errs() << "Hints: Function: " << F.getName() << " " << PrefetchHints.size() << "\n";
+  // errs() << "Hints: Function: " << F.getName() << " " << PrefetchHints.size()
+  // << "\n";
   for (const PrefetchHint &H : PrefetchHints) {
     SmallString<128> PrefetchTargetName(H.TargetFunctionName);
     PrefetchTargetName += "_";

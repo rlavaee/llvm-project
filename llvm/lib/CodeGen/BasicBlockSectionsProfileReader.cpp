@@ -303,7 +303,8 @@ Error BasicBlockSectionsProfileReader::ReadV1Profile() {
       if (getAsUnsignedInteger(PrefetchTargetStr[1], 10, TargetBBOffset))
         return createProfileParseError(Twine("unsigned integer expected: '") +
                                        PrefetchTargetStr[1]);
-      FI->second.PrefetchTargets.insert(BBPosition{*TargetBBID, static_cast<unsigned>(TargetBBOffset)});
+      FI->second.PrefetchTargets.insert(
+          BBPosition{*TargetBBID, static_cast<unsigned>(TargetBBOffset)});
       continue;
     }
 

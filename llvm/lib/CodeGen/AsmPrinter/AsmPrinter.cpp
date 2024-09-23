@@ -1752,8 +1752,8 @@ void AsmPrinter::emitFunctionBody() {
             Twine("_") +
             utostr(MBB.getPrefetchTargets()[NextPrefetchTargetIndex]));
         OutStreamer->emitSymbolAttribute(PrefetchTargetSymbol, MCSA_Global);
-         //errs() << "Emitting symbol: " << PrefetchTargetSymbol->getName() <<
-         //"\n";
+        // errs() << "Emitting symbol: " << PrefetchTargetSymbol->getName() <<
+        //"\n";
         OutStreamer->emitLabel(PrefetchTargetSymbol);
         ++NextPrefetchTargetIndex;
         if (NextPrefetchTargetIndex >=
@@ -1881,21 +1881,20 @@ void AsmPrinter::emitFunctionBody() {
       for (auto &Handler : DebugHandlers)
         Handler->endInstruction();
     }
-   while (NextPrefetchTargetIndex != -1) {
-        MCSymbol *PrefetchTargetSymbol = OutContext.getOrCreateSymbol(
-            MF->getName() + Twine("_") + utostr(MBB.getBBID()->BaseID) +
-            Twine("_") +
-            utostr(MBB.getPrefetchTargets()[NextPrefetchTargetIndex]));
-        OutStreamer->emitSymbolAttribute(PrefetchTargetSymbol, MCSA_Global);
-         //errs() << "Emitting symbol: " << PrefetchTargetSymbol->getName() <<
-         //"\n";
-        OutStreamer->emitLabel(PrefetchTargetSymbol);
-        ++NextPrefetchTargetIndex;
-        if (NextPrefetchTargetIndex >=
-            static_cast<int>(MBB.getPrefetchTargets().size()))
-          NextPrefetchTargetIndex = -1;
-      }
-
+    while (NextPrefetchTargetIndex != -1) {
+      MCSymbol *PrefetchTargetSymbol = OutContext.getOrCreateSymbol(
+          MF->getName() + Twine("_") + utostr(MBB.getBBID()->BaseID) +
+          Twine("_") +
+          utostr(MBB.getPrefetchTargets()[NextPrefetchTargetIndex]));
+      OutStreamer->emitSymbolAttribute(PrefetchTargetSymbol, MCSA_Global);
+      // errs() << "Emitting symbol: " << PrefetchTargetSymbol->getName() <<
+      //"\n";
+      OutStreamer->emitLabel(PrefetchTargetSymbol);
+      ++NextPrefetchTargetIndex;
+      if (NextPrefetchTargetIndex >=
+          static_cast<int>(MBB.getPrefetchTargets().size()))
+        NextPrefetchTargetIndex = -1;
+    }
 
     // We must emit temporary symbol for the end of this basic block, if either
     // we have BBLabels enabled or if this basic blocks marks the end of a
