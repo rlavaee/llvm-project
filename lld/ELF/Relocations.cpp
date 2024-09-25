@@ -819,6 +819,8 @@ void elf::reportUndefinedSymbols() {
 // Returns true if the undefined symbol will produce an error message.
 static bool maybeReportUndefined(Undefined &sym, InputSectionBase &sec,
                                  uint64_t offset) {
+  if (sym.getName().starts_with("__llvm_prefetch_target_"))
+    return false;
   std::lock_guard<std::mutex> lock(relocMutex);
   // If versioned, issue an error (even if the symbol is weak) because we don't
   // know the defining filename which is required to construct a Verneed entry.
@@ -1259,6 +1261,8 @@ void RelocationScanner::processAux(RelExpr expr, RelType type, uint64_t offset,
     }
   }
 
+  if (sym.getName().starts_with("__llvm_prefetch_target_"))
+    return;
   errorOrWarn("relocation " + toString(type) + " cannot be used against " +
               (sym.getName().empty() ? "local symbol"
                                      : "symbol '" + toString(sym) + "'") +

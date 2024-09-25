@@ -22,7 +22,6 @@
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/Statistic.h"
-#include "llvm/ADT/StringExtras.h"
 #include "llvm/Analysis/BlockFrequencyInfo.h"
 #include "llvm/Analysis/BranchProbabilityInfo.h"
 #include "llvm/Analysis/InstructionSimplify.h"
@@ -580,7 +579,6 @@ bool CodeGenPrepare::_run(Function &F) {
   bool EverMadeChange = false;
 
   OptSize = F.hasOptSize();
-
   // Use the basic-block-sections profile to promote hot functions to .text.hot
   // if requested.
   if (BBSectionsGuidedSectionPrefix && BBSectionsProfileReader &&

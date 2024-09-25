@@ -1748,12 +1748,16 @@ void AsmPrinter::emitFunctionBody() {
           NumInstsInBlock * 4 >=
               MBB.getPrefetchTargets()[NextPrefetchTargetIndex]) {
         MCSymbol *PrefetchTargetSymbol = OutContext.getOrCreateSymbol(
-            MF->getName() + Twine("_") + utostr(MBB.getBBID()->BaseID) +
+            Twine("__llvm_prefetch_target_") + MF->getName() + Twine("_") + utostr(MBB.getBBID()->BaseID) +
             Twine("_") +
             utostr(MBB.getPrefetchTargets()[NextPrefetchTargetIndex]));
-        OutStreamer->emitSymbolAttribute(PrefetchTargetSymbol, MCSA_Global);
-        // errs() << "Emitting symbol: " << PrefetchTargetSymbol->getName() <<
-        //"\n";
+        if (MF->getFunction().hasWeakLinkage()) {
+          OutStreamer->emitSymbolAttribute(PrefetchTargetSymbol, MCSA_WeakDefinition);
+        } else {
+          OutStreamer->emitSymbolAttribute(PrefetchTargetSymbol, MCSA_Global);
+        }
+
+        OutStreamer->emitSymbolAttribute(PrefetchTargetSymbol, MCSA_Extern);
         OutStreamer->emitLabel(PrefetchTargetSymbol);
         ++NextPrefetchTargetIndex;
         if (NextPrefetchTargetIndex >=

@@ -96,11 +96,13 @@ bool PrefetchInsertion::runOnMachineFunction(MachineFunction &MF) {
     BB.setPrefetchTargets(PrefetchTargetsByBBID[*BB.getBBID()]);
 
   for (const BBPosition &P : PrefetchTargets) {
-    SmallString<128> PrefetchTargetName(F.getName());
+    SmallString<128> PrefetchTargetName("__llvm_prefetch_target_");
+    PrefetchTargetName += F.getName();
     PrefetchTargetName += "_";
     PrefetchTargetName += utostr(P.BBID.BaseID);
     PrefetchTargetName += "_";
     PrefetchTargetName += utostr(P.BBOffset);
+    errs() << "Adding target: " << PrefetchTargetName << "\n";
     F.getParent()->getOrInsertGlobal(PrefetchTargetName, PtrTy);
   }
 
@@ -110,7 +112,8 @@ bool PrefetchInsertion::runOnMachineFunction(MachineFunction &MF) {
   // errs() << "Hints: Function: " << F.getName() << " " << PrefetchHints.size()
   // << "\n";
   for (const PrefetchHint &H : PrefetchHints) {
-    SmallString<128> PrefetchTargetName(H.TargetFunctionName);
+    SmallString<128> PrefetchTargetName("__llvm_prefetch_target_");
+    PrefetchTargetName += H.TargetFunctionName;
     PrefetchTargetName += "_";
     PrefetchTargetName += utostr(H.TargetPosition.BBID.BaseID);
     PrefetchTargetName += "_";
@@ -136,7 +139,8 @@ bool PrefetchInsertion::runOnMachineFunction(MachineFunction &MF) {
       auto Current = I;
       if (NumInsts * 4 >= BBPrefetchHintIt->first) {
         for (const auto &PrefetchTarget : BBPrefetchHintIt->second) {
-          SmallString<128> PrefetchTargetName = PrefetchTarget.TargetFunction;
+          SmallString<128> PrefetchTargetName("__llvm_prefetch_target_");
+          PrefetchTargetName += PrefetchTarget.TargetFunction;
           PrefetchTargetName += "_";
           PrefetchTargetName += utostr(PrefetchTarget.TargetBBID.BaseID);
           PrefetchTargetName += "_";
