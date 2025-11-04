@@ -12,13 +12,12 @@
 /// Prefetch insertion pass.
 //===----------------------------------------------------------------------===//
 
+#include "MCTargetDesc/X86MCTargetDesc.h"
 #include "X86.h"
 #include "X86InstrBuilder.h"
 #include "X86InstrInfo.h"
 #include "X86MachineFunctionInfo.h"
 #include "X86Subtarget.h"
-#include "llvm/CodeGen/MachineOperand.h"
-#include "MCTargetDesc/X86MCTargetDesc.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/ADT/StringRef.h"
@@ -27,6 +26,7 @@
 #include "llvm/CodeGen/MachineBasicBlock.h"
 #include "llvm/CodeGen/MachineFunction.h"
 #include "llvm/CodeGen/MachineFunctionPass.h"
+#include "llvm/CodeGen/MachineOperand.h"
 #include "llvm/CodeGen/Passes.h"
 #include "llvm/CodeGen/TargetInstrInfo.h"
 #include "llvm/InitializePasses.h"
@@ -39,12 +39,13 @@ using namespace llvm;
 
 static cl::opt<bool> UseCodePrefetchInstruction(
     "use-code-prefetch-instruction",
-    cl::desc("Whether to use the new prefetchit1 instruction."),
-    cl::init(true), cl::Hidden);
+    cl::desc("Whether to use the new prefetchit1 instruction."), cl::init(true),
+    cl::Hidden);
 static cl::opt<bool> PrefetchNextAddress(
     "prefetch-next-address",
-    cl::desc("Whether to prefetch the next address instead of the target address."), cl::init(false),
-    cl::Hidden);
+    cl::desc(
+        "Whether to prefetch the next address instead of the target address."),
+    cl::init(false), cl::Hidden);
 
 namespace {} // end anonymous namespace
 
@@ -92,8 +93,8 @@ bool PrefetchInsertion::runOnMachineFunction(MachineFunction &MF) {
   DenseSet<BBPosition> PrefetchTargets =
       getAnalysis<BasicBlockSectionsProfileReaderWrapperPass>()
           .getPrefetchTargetsForFunction(MF.getName());
-  //errs() << "Targets: Function: " << F.getName() << " "
-  //       << PrefetchTargets.size() << "\n";
+  // errs() << "Targets: Function: " << F.getName() << " "
+  //        << PrefetchTargets.size() << "\n";
   DenseMap<UniqueBBID, SmallVector<unsigned>> PrefetchTargetsByBBID;
   for (const auto &P : PrefetchTargets)
     PrefetchTargetsByBBID[P.BBID].push_back(P.BBOffset);
@@ -115,8 +116,8 @@ bool PrefetchInsertion::runOnMachineFunction(MachineFunction &MF) {
   SmallVector<PrefetchHint> PrefetchHints =
       getAnalysis<BasicBlockSectionsProfileReaderWrapperPass>()
           .getPrefetchHintsForFunction(MF.getName());
-  //errs() << "Hints: Function: " << F.getName() << " " << PrefetchHints.size()
-  //       << "\n";
+  // errs() << "Hints: Function: " << F.getName() << " " << PrefetchHints.size()
+  //        << "\n";
   for (const PrefetchHint &H : PrefetchHints) {
     SmallString<128> PrefetchTargetName("__llvm_prefetch_target_");
     PrefetchTargetName += H.TargetFunctionName;
@@ -147,38 +148,37 @@ bool PrefetchInsertion::runOnMachineFunction(MachineFunction &MF) {
       auto Current = I;
       if (NumCallsites >= BBPrefetchHintIt->first || Current == E) {
         for (const auto &PrefetchTarget : BBPrefetchHintIt->second) {
-            SmallString<128> PrefetchTargetName("__llvm_prefetch_target_");
-            PrefetchTargetName += PrefetchTarget.TargetFunction;
-            PrefetchTargetName += "_";
-            PrefetchTargetName += utostr(PrefetchTarget.TargetBBID.BaseID);
-            PrefetchTargetName += "_";
-            PrefetchTargetName += utostr(PrefetchTarget.TargetBBOffset);
-            auto *GV =
-                MF.getFunction().getParent()->getNamedValue(PrefetchTargetName);
-            //errs() << "Inserting prefetch for " << GV->getName() << " at "
-            //       << MF.getName() << " " << BB.getName() << " " << NumInsts
-            //       << "\n";
-            MachineInstr *PFetch = MF.CreateMachineInstr(
-                UseCodePrefetchInstruction ? TII->get(X86::PREFETCHIT1)
-                                           : TII->get(X86::PREFETCHT1),
-                Current != BB.instr_end() ? Current->getDebugLoc() : DebugLoc(),
-                true);
-            PFetch->setFlag(MachineInstr::Prefetch);
-            MachineInstrBuilder MIB(MF, PFetch);
+          SmallString<128> PrefetchTargetName("__llvm_prefetch_target_");
+          PrefetchTargetName += PrefetchTarget.TargetFunction;
+          PrefetchTargetName += "_";
+          PrefetchTargetName += utostr(PrefetchTarget.TargetBBID.BaseID);
+          PrefetchTargetName += "_";
+          PrefetchTargetName += utostr(PrefetchTarget.TargetBBOffset);
+          auto *GV =
+              MF.getFunction().getParent()->getNamedValue(PrefetchTargetName);
+          // errs() << "Inserting prefetch for " << GV->getName() << " at "
+          //        << MF.getName() << " " << BB.getName() << " " << NumInsts
+          //        << "\n";
+          MachineInstr *PFetch = MF.CreateMachineInstr(
+              UseCodePrefetchInstruction ? TII->get(X86::PREFETCHIT1)
+                                         : TII->get(X86::PREFETCHT1),
+              Current != BB.instr_end() ? Current->getDebugLoc() : DebugLoc(),
+              true);
+          PFetch->setFlag(MachineInstr::Prefetch);
+          MachineInstrBuilder MIB(MF, PFetch);
           if (!PrefetchNextAddress) {
-              MIB.addMemOperand(
-                  MF.getMachineMemOperand(MachinePointerInfo(GV),
-                                          MachineMemOperand::MOLoad, /*s=*/8,
-                                          /*base_alignment=*/llvm::Align(1)));
-            }
-            MIB.addReg(X86::RIP).addImm(1).addReg(X86::NoRegister);
-            if (PrefetchNextAddress)
-              MIB.addImm(0);
-            else
-              MIB.addGlobalAddress(GV);
-            MIB.addReg(X86::NoRegister);
-            BB.insert(Current, PFetch);
+            MIB.addMemOperand(MF.getMachineMemOperand(
+                MachinePointerInfo(GV), MachineMemOperand::MOLoad, /*s=*/8,
+                /*base_alignment=*/llvm::Align(1)));
           }
+          MIB.addReg(X86::RIP).addImm(1).addReg(X86::NoRegister);
+          if (PrefetchNextAddress)
+            MIB.addImm(0);
+          else
+            MIB.addGlobalAddress(GV);
+          MIB.addReg(X86::NoRegister);
+          BB.insert(Current, PFetch);
+        }
         ++BBPrefetchHintIt;
         if (BBPrefetchHintIt == PrefetchHintsByBBID[*BB.getBBID()].end())
           break;
@@ -193,7 +193,6 @@ bool PrefetchInsertion::runOnMachineFunction(MachineFunction &MF) {
           ++NumCallsites;
         ++I;
       }
-
     }
   }
   return true;
