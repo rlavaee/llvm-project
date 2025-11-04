@@ -65,9 +65,9 @@ std::pair<bool, SmallVector<BBClusterInfo>>
 BasicBlockSectionsProfileReader::getClusterInfoForFunction(
     StringRef FuncName) const {
   auto R = ProgramPathAndClusterInfo.find(getAliasName(FuncName));
-  return R != ProgramPathAndClusterInfo.end()
-             ? std::pair(true, R->second.ClusterInfo)
-             : std::pair(false, SmallVector<BBClusterInfo>());
+  if (R == ProgramPathAndClusterInfo.end() || R->second.ClusterInfo.empty())
+    return std::pair(false, SmallVector<BBClusterInfo>());
+  return std::pair(true, R->second.ClusterInfo);
 }
 
 SmallVector<SmallVector<unsigned>>
@@ -89,6 +89,19 @@ uint64_t BasicBlockSectionsProfileReader::getEdgeCount(
   if (EdgeIt == NodeIt->second.end())
     return 0;
   return EdgeIt->second;
+}
+
+SmallVector<PrefetchHint>
+BasicBlockSectionsProfileReader::getPrefetchHintsForFunction(
+    StringRef FuncName) const {
+  return ProgramPathAndClusterInfo.lookup(getAliasName(FuncName)).PrefetchHints;
+}
+
+DenseSet<BBPosition>
+BasicBlockSectionsProfileReader::getPrefetchTargetsForFunction(
+    StringRef FuncName) const {
+  return ProgramPathAndClusterInfo.lookup(getAliasName(FuncName))
+      .PrefetchTargets;
 }
 
 // Reads the version 1 basic block sections profile. Profile for each function
@@ -285,6 +298,60 @@ Error BasicBlockSectionsProfileReader::ReadV1Profile() {
           FI->second.EdgeCounts[SrcBBID][*BBID] = Count;
         }
       }
+      continue;
+    }
+    case 'h': { // Prefetch hint specifier.
+      // Skip the profile when we the profile iterator (FI) refers to the
+      // past-the-end element.
+      if (FI == ProgramPathAndClusterInfo.end())
+        continue;
+      assert(Values.size() == 2);
+      SmallVector<StringRef, 2> PrefetchSiteStr;
+      Values[0].split(PrefetchSiteStr, '@');
+      assert(PrefetchSiteStr.size() == 2);
+      auto SiteBBID = parseUniqueBBID(PrefetchSiteStr[0]);
+      if (!SiteBBID)
+        return SiteBBID.takeError();
+      unsigned long long SiteBBOffset;
+      if (getAsUnsignedInteger(PrefetchSiteStr[1], 10, SiteBBOffset))
+        return createProfileParseError(Twine("unsigned integer expected: '") +
+                                       PrefetchSiteStr[1]);
+
+      SmallVector<StringRef, 3> PrefetchTargetStr;
+      Values[1].split(PrefetchTargetStr, '@');
+      assert(PrefetchTargetStr.size() == 3);
+      auto TargetBBID = parseUniqueBBID(PrefetchTargetStr[1]);
+      if (!TargetBBID)
+        return TargetBBID.takeError();
+      unsigned long long TargetBBOffset;
+      if (getAsUnsignedInteger(PrefetchTargetStr[2], 10, TargetBBOffset))
+        return createProfileParseError(Twine("unsigned integer expected: '") +
+                                       PrefetchTargetStr[2]);
+      // errs() << "Read it " << " " << SiteBBOffset << " " <<
+      // PrefetchTargetStr[0] << " " <<TargetBBOffset << "\n";
+      FI->second.PrefetchHints.push_back(
+          PrefetchHint{{*SiteBBID, static_cast<unsigned>(SiteBBOffset)},
+                       PrefetchTargetStr[0],
+                       {*TargetBBID, static_cast<unsigned>(TargetBBOffset)}});
+      continue;
+    }
+    case 't': { // Prefetch target specifier.
+      // Skip the profile when we the profile iterator (FI) refers to the
+      // past-the-end element.
+      if (FI == ProgramPathAndClusterInfo.end())
+        continue;
+      assert(Values.size() == 1);
+      SmallVector<StringRef, 2> PrefetchTargetStr;
+      Values[0].split(PrefetchTargetStr, '@');
+      assert(PrefetchTargetStr.size() == 2);
+      auto TargetBBID = parseUniqueBBID(PrefetchTargetStr[0]);
+      if (!TargetBBID)
+        return TargetBBID.takeError();
+      unsigned long long TargetBBOffset;
+      if (getAsUnsignedInteger(PrefetchTargetStr[1], 10, TargetBBOffset))
+        return createProfileParseError(Twine("unsigned integer expected: '") +
+                                       PrefetchTargetStr[1]);
+      FI->second.PrefetchTargets.insert(BBPosition{*TargetBBID, static_cast<unsigned>(TargetBBOffset)});
       continue;
     }
     default:
@@ -491,6 +558,18 @@ uint64_t BasicBlockSectionsProfileReaderWrapperPass::getEdgeCount(
     StringRef FuncName, const UniqueBBID &SrcBBID,
     const UniqueBBID &SinkBBID) const {
   return BBSPR.getEdgeCount(FuncName, SrcBBID, SinkBBID);
+}
+
+SmallVector<PrefetchHint>
+BasicBlockSectionsProfileReaderWrapperPass::getPrefetchHintsForFunction(
+    StringRef FuncName) const {
+  return BBSPR.getPrefetchHintsForFunction(FuncName);
+}
+
+DenseSet<BBPosition>
+BasicBlockSectionsProfileReaderWrapperPass::getPrefetchTargetsForFunction(
+    StringRef FuncName) const {
+  return BBSPR.getPrefetchTargetsForFunction(FuncName);
 }
 
 BasicBlockSectionsProfileReader &

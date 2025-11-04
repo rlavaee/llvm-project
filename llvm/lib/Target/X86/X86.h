@@ -151,6 +151,8 @@ FunctionPass *createX86DiscriminateMemOpsPass();
 /// This pass applies profiling information to insert cache prefetches.
 FunctionPass *createX86InsertPrefetchPass();
 
+FunctionPass *createPrefetchInsertionPass();
+
 /// This pass insert wait instruction after X87 instructions which could raise
 /// fp exceptions when strict-fp enabled.
 FunctionPass *createX86InsertX87waitPass();
