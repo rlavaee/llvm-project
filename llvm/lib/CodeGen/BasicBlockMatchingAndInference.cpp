@@ -25,8 +25,15 @@
 #include "llvm/CodeGen/BasicBlockSectionsProfileReader.h"
 #include "llvm/CodeGen/MachineBlockHashInfo.h"
 #include "llvm/CodeGen/Passes.h"
+#include "llvm/IR/DebugInfoMetadata.h"
+#include "llvm/IR/DiagnosticInfo.h"
+#include "llvm/IR/Module.h"
 #include "llvm/InitializePasses.h"
+#include "llvm/ProfileData/SampleProf.h"
+#include "llvm/ProfileData/SampleProfReader.h"
 #include "llvm/Support/Debug.h"
+#include "llvm/Support/VirtualFileSystem.h"
+#include <cmath>
 
 using namespace llvm;
 
@@ -83,8 +90,62 @@ INITIALIZE_PASS_END(BasicBlockMatchingAndInference, "machine-block-match-infer",
 
 char BasicBlockMatchingAndInference::ID = 0;
 
+namespace {
+/// Looks up the sampled weights of the instructions of one machine function in
+/// a line-based AFDO profile. This is the lookup part of
+/// SampleProfileLoaderBaseImpl without its weight propagation, remarks and
+/// coverage tracking, which are not needed to supplement the Propeller profile.
+class AFDOFunctionWeights {
+public:
+  AFDOFunctionWeights(const FunctionSamples &Samples,
+                      SampleProfileReaderItaniumRemapper *Remapper)
+      : Samples(Samples), Remapper(Remapper) {}
+
+  /// Returns the weight of \p MI, or an error if it has no samples.
+  ErrorOr<uint64_t> getInstWeight(const MachineInstr &MI) {
+    const DILocation *DIL = MI.getDebugLoc();
+    if (!DIL)
+      return std::error_code();
+    // Find the samples of the inlined instance MI comes from.
+    auto [It, Inserted] = InlinedSamples.try_emplace(DIL, nullptr);
+    if (Inserted)
+      It->second = Samples.findFunctionSamples(DIL, Remapper);
+    if (!It->second)
+      return std::error_code();
+    return It->second->findSamplesAt(FunctionSamples::getOffset(DIL),
+                                     DIL->getBaseDiscriminator());
+  }
+
+  /// Returns the maximum weight among the non-meta instructions of \p MBB, or
+  /// an error if none of them has samples.
+  ErrorOr<uint64_t> getBlockWeight(const MachineBasicBlock &MBB) {
+    uint64_t Max = 0;
+    bool HasWeight = false;
+    for (const MachineInstr &MI : MBB) {
+      if (MI.isMetaInstruction())
+        continue;
+      if (ErrorOr<uint64_t> W = getInstWeight(MI)) {
+        Max = std::max(Max, *W);
+        HasWeight = true;
+      }
+    }
+    if (!HasWeight)
+      return std::error_code();
+    return Max;
+  }
+
+private:
+  const FunctionSamples &Samples;
+  SampleProfileReaderItaniumRemapper *Remapper;
+  // Samples of the inlined instance each location comes from.
+  DenseMap<const DILocation *, const FunctionSamples *> InlinedSamples;
+};
+} // namespace
+
 BasicBlockMatchingAndInference::BasicBlockMatchingAndInference()
     : MachineFunctionPass(ID) {}
+
+BasicBlockMatchingAndInference::~BasicBlockMatchingAndInference() = default;
 
 void BasicBlockMatchingAndInference::getAnalysisUsage(AnalysisUsage &AU) const {
   AU.addRequired<MachineBlockHashInfo>();
@@ -239,6 +300,83 @@ void BasicBlockMatchingAndInference::generateWeightInfoByInference(
                         std::move(BlockWeights), std::move(EdgeWeights)});
 }
 
+bool BasicBlockMatchingAndInference::doInitialization(Module &M) {
+  const CodeGenOptions &Opts = getCodeGenOptions(M);
+  StringRef ProfileFile = Opts.basic_block_section_afdo_profile;
+  // The AFDO profile only supplements the weights matched by BBIDs.
+  if (ProfileFile.empty() || !Opts.propeller_match_bbid)
+    return false;
+  LLVMContext &Ctx = M.getContext();
+  // TODO: Handle flow-sensitive discriminators. For now, the profile is read
+  // with base discriminators only, and weights are looked up by the base
+  // discriminator of each instruction.
+  auto ReaderOrErr = SampleProfileReader::create(
+      ProfileFile, Ctx, *vfs::getRealFileSystem(), FSDiscriminatorPass::Base,
+      Opts.basic_block_section_afdo_remapping_file);
+  if (std::error_code EC = ReaderOrErr.getError()) {
+    Ctx.diagnose(DiagnosticInfoSampleProfile(
+        ProfileFile, "Could not open AFDO profile: " + EC.message()));
+    return false;
+  }
+  std::unique_ptr<SampleProfileReader> Reader = std::move(*ReaderOrErr);
+  Reader->setModule(&M);
+  if (Reader->read() != sampleprof_error::success) {
+    Ctx.diagnose(DiagnosticInfoSampleProfile(ProfileFile,
+                                             "Could not read AFDO profile"));
+    return false;
+  }
+  if (Reader->profileIsProbeBased()) {
+    Ctx.diagnose(DiagnosticInfoSampleProfile(
+        ProfileFile, "Pseudo probe based AFDO profiles are not supported",
+        DS_Warning));
+    return false;
+  }
+  AFDOReader = std::move(Reader);
+  return false;
+}
+
+void BasicBlockMatchingAndInference::supplementWeightInfoWithAFDO(
+    MachineFunction &MF, WeightInfo &MatchWeight) {
+  if (!AFDOReader)
+    return;
+  const FunctionSamples *Samples = AFDOReader->getSamplesFor(MF.getFunction());
+  if (!Samples || Samples->empty())
+    return;
+  AFDOFunctionWeights AFDO(*Samples, AFDOReader->getRemapper());
+
+  // Scale the AFDO weights so that the entry block weights of both profiles
+  // agree.
+  const MachineBasicBlock &EntryBB = MF.front();
+  uint64_t PropellerEntryWeight =
+      std::max<uint64_t>(MatchWeight.BlockWeights.lookup(&EntryBB), 1);
+  uint64_t AFDOEntryWeight = 0;
+  if (ErrorOr<uint64_t> W = AFDO.getBlockWeight(EntryBB))
+    AFDOEntryWeight = *W;
+  if (AFDOEntryWeight == 0)
+    AFDOEntryWeight = Samples->getHeadSamplesEstimate();
+  AFDOEntryWeight = std::max<uint64_t>(AFDOEntryWeight, 1);
+
+  for (const MachineBasicBlock &MBB : MF) {
+    // Only supplement blocks without Propeller samples. Inference treats
+    // every block in BlockWeights as known, so blocks without AFDO samples
+    // must stay out of the map.
+    if (MatchWeight.BlockWeights.lookup(&MBB) != 0)
+      continue;
+    ErrorOr<uint64_t> AFDOWeight = AFDO.getBlockWeight(MBB);
+    if (!AFDOWeight || *AFDOWeight == 0)
+      continue;
+    MatchWeight.BlockWeights[&MBB] = std::max<uint64_t>(
+        1, std::round(static_cast<double>(*AFDOWeight) / AFDOEntryWeight *
+                      PropellerEntryWeight));
+  }
+}
+
+bool BasicBlockMatchingAndInference::doFinalization(Module &M) {
+  // The profile is read for each module.
+  AFDOReader.reset();
+  return false;
+}
+
 bool BasicBlockMatchingAndInference::runOnMachineFunction(MachineFunction &MF) {
   if (MF.empty())
     return false;
@@ -251,6 +389,7 @@ bool BasicBlockMatchingAndInference::runOnMachineFunction(MachineFunction &MF) {
   BasicBlockMatchingAndInference::WeightInfo MatchWeight;
   if (Opts.propeller_match_bbid) {
     MatchWeight = initWeightInfoByBBID(MF, *CFG);
+    supplementWeightInfoWithAFDO(MF, MatchWeight);
   } else {
     MatchWeight = initWeightInfoByMatching(MF);
     // If the ratio of the number of MBBs in matching to the total number of

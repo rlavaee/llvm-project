@@ -11,6 +11,12 @@ include "llvm/Option/LibraryOptions.td"
 def CodeGenOptions : OptionsStruct;
 
 // BasicBlockMatchingAndInference.cpp
+let MetaVarName = "<filename>" in
+defm : ValueField<"basic-block-section-afdo-profile", "StringRef", "",
+  "AFDO profile used with -basic-block-section-match-infer and -propeller-match-bbid to supplement the weights of basic blocks without samples in the Propeller profile">;
+let MetaVarName = "<filename>" in
+defm : ValueField<"basic-block-section-afdo-remapping-file", "StringRef", "",
+  "Symbol remapping file for -basic-block-section-afdo-profile">;
 defm : ValueField<"propeller-infer-threshold", "float", "0.6",
   "Threshold for infer stale profile">;
 defm : BoolField<"propeller-match-bbid", "false",
