@@ -21,6 +21,7 @@
 #include "llvm/Analysis/ScopedNoAliasAA.h"
 #include "llvm/Analysis/TargetTransformInfo.h"
 #include "llvm/Analysis/TypeBasedAliasAnalysis.h"
+#include "llvm/CodeGen/BasicBlockMatchingAndInference.h"
 #include "llvm/CodeGen/BasicBlockSectionsProfileReader.h"
 #include "llvm/CodeGen/CSEConfigBase.h"
 #include "llvm/CodeGen/CodeGenTargetMachineImpl.h"
@@ -1137,12 +1138,15 @@ void TargetPassConfig::addMachinePasses() {
   // functions are split using their PGO/AutoFDO profile.
   if (TM->getBBSectionsType() != llvm::BasicBlockSection::None ||
       TM->Options.BBAddrMap || SplitFunctionsWithPGO) {
-    if (shouldEmitBBHash() || Opts.basic_block_section_match_infer)
+    // Supplementing the Propeller profile with AFDO requires inference.
+    bool MatchInfer = Opts.basic_block_section_match_infer ||
+                      !BasicBlockSectionAFDOProfile.empty();
+    if (shouldEmitBBHash() || MatchInfer)
       addPass(llvm::createMachineBlockHashInfoPass());
     if (TM->getBBSectionsType() == llvm::BasicBlockSection::List) {
       addPass(llvm::createBasicBlockSectionsProfileReaderWrapperPass(
           TM->getBBSectionsFuncListBuf()));
-      if (Opts.basic_block_section_match_infer)
+      if (MatchInfer)
         addPass(llvm::createBasicBlockMatchingAndInferencePass());
       else {
         addPass(llvm::createBasicBlockPathCloningPass());

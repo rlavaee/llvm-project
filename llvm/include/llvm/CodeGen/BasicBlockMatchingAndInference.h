@@ -15,9 +15,19 @@
 
 #include "llvm/CodeGen/BasicBlockSectionsProfileReader.h"
 #include "llvm/CodeGen/MachineFunctionPass.h"
+#include "llvm/Support/CommandLine.h"
 #include "llvm/Transforms/Utils/SampleProfileInference.h"
+#include <memory>
+#include <string>
 
 namespace llvm {
+
+class Module;
+
+/// Path of the AFDO profile used to supplement the Propeller profile.
+LLVM_ABI extern cl::opt<std::string> BasicBlockSectionAFDOProfile;
+/// Path of the remapping file for BasicBlockSectionAFDOProfile.
+LLVM_ABI extern cl::opt<std::string> BasicBlockSectionAFDORemappingFile;
 
 class LLVM_ABI BasicBlockMatchingAndInference : public MachineFunctionPass {
 private:
@@ -37,6 +47,7 @@ private:
 public:
   static char ID;
   BasicBlockMatchingAndInference();
+  ~BasicBlockMatchingAndInference() override;
 
   StringRef getPassName() const override {
     return "Basic Block Matching and Inference";
@@ -44,12 +55,21 @@ public:
 
   void getAnalysisUsage(AnalysisUsage &AU) const override;
 
+  bool doInitialization(Module &M) override;
   bool runOnMachineFunction(MachineFunction &F) override;
+  bool doFinalization(Module &M) override;
 
   std::optional<WeightInfo> getWeightInfo(StringRef FuncName) const;
 
 private:
   StringMap<WeightInfo> ProgramWeightInfo;
+  // Looks up weights in the AFDO profile of the current module. Null if no
+  // AFDO profile is given or it fails to load.
+  class AFDOProfile;
+  std::unique_ptr<AFDOProfile> AFDO;
+
+  void supplementWeightInfoWithAFDO(MachineFunction &MF,
+                                    WeightInfo &MatchWeight);
 
   WeightInfo initWeightInfoByMatching(MachineFunction &MF);
   WeightInfo initWeightInfoByBBID(MachineFunction &MF, const CFGProfile &CFG);
