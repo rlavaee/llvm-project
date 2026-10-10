@@ -21,6 +21,8 @@
 #include "llvm/CodeGen/BasicBlockMatchingAndInference.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
+#include "llvm/ADT/Hashing.h"
+#include "llvm/ADT/STLFunctionalExtras.h"
 #include "llvm/CodeGen/BasicBlockSectionsProfileReader.h"
 #include "llvm/CodeGen/MachineBlockHashInfo.h"
 #include "llvm/CodeGen/Passes.h"
@@ -33,7 +35,10 @@
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/VirtualFileSystem.h"
+#include "llvm/Support/xxhash.h"
 #include <cmath>
+#include <optional>
+#include <tuple>
 
 using namespace llvm;
 
@@ -151,12 +156,15 @@ public:
   }
 
   /// Returns the maximum weight among the non-meta instructions of \p MBB in
-  /// the selected function, or an error if none of them has samples.
-  ErrorOr<uint64_t> getBlockWeight(const MachineBasicBlock &MBB) {
+  /// the selected function, ignoring instructions for which \p Skip returns
+  /// true. Returns an error if none of them has samples.
+  ErrorOr<uint64_t>
+  getBlockWeight(const MachineBasicBlock &MBB,
+                 function_ref<bool(const MachineInstr &)> Skip = nullptr) {
     uint64_t Max = 0;
     bool HasWeight = false;
     for (const MachineInstr &MI : MBB) {
-      if (MI.isMetaInstruction())
+      if (MI.isMetaInstruction() || (Skip && Skip(MI)))
         continue;
       if (ErrorOr<uint64_t> W = getInstWeight(MI)) {
         Max = std::max(Max, *W);
@@ -333,6 +341,84 @@ void BasicBlockMatchingAndInference::generateWeightInfoByInference(
                         std::move(BlockWeights), std::move(EdgeWeights)});
 }
 
+namespace {
+/// Identifies the AFDO samples an instruction is attributed to: its file,
+/// line, discriminator and a hash of its inline stack.
+using SampleLocation = std::tuple<StringRef, unsigned, unsigned, uint64_t>;
+
+/// Hashes the line numbers and linkage names of the inline stack of \p DIL,
+/// following MIRFSDiscriminator.cpp.
+uint64_t getInlineStackHash(const DILocation *DIL) {
+  auto HashCombine = [](uint64_t Seed, uint64_t Val) {
+    std::hash<uint64_t> Hasher;
+    return Seed ^ (Hasher(Val) + 0x9e3779b9 + (Seed << 6) + (Seed >> 2));
+  };
+  uint64_t Ret = 0;
+  for (DIL = DIL->getInlinedAt(); DIL; DIL = DIL->getInlinedAt()) {
+    Ret = HashCombine(Ret, xxh3_64bits(ArrayRef<uint8_t>(DIL->getLine())));
+    Ret = HashCombine(Ret, xxh3_64bits(DIL->getSubprogramLinkageName()));
+  }
+  return Ret;
+}
+
+/// Finds sample locations that appear both in blocks with and without
+/// Propeller samples. AFDO samples at such locations may have been collected
+/// for the blocks with Propeller samples, so they must not be used to
+/// supplement the blocks without.
+class AmbiguousSampleLocations {
+public:
+  AmbiguousSampleLocations(
+      const MachineFunction &MF,
+      const DenseMap<const MachineBasicBlock *, uint64_t> &BlockWeights) {
+    for (const MachineBasicBlock &MBB : MF) {
+      bool HasWeight = BlockWeights.lookup(&MBB) != 0;
+      for (const MachineInstr &MI : MBB) {
+        if (std::optional<SampleLocation> Loc = getLocation(MI)) {
+          Presence &P = Locations[*Loc];
+          (HasWeight ? P.InBlockWithWeight : P.InBlockWithoutWeight) = true;
+        }
+      }
+    }
+  }
+
+  bool contains(const MachineInstr &MI) {
+    std::optional<SampleLocation> Loc = getLocation(MI);
+    if (!Loc)
+      return false;
+    Presence P = Locations.lookup(*Loc);
+    return P.InBlockWithWeight && P.InBlockWithoutWeight;
+  }
+
+private:
+  struct Presence {
+    bool InBlockWithWeight = false;
+    bool InBlockWithoutWeight = false;
+  };
+
+  std::optional<SampleLocation> getLocation(const MachineInstr &MI) {
+    if (MI.isMetaInstruction())
+      return std::nullopt;
+    const DILocation *DIL = MI.getDebugLoc().get();
+    if (!DIL || DIL->getLine() == 0)
+      return std::nullopt;
+    // Many instructions share a debug location, and hashing the inline stack
+    // is linear in its depth, so cache the location of each DILocation.
+    auto [It, Inserted] = LocationCache.try_emplace(DIL);
+    if (Inserted) {
+      unsigned Discriminator = EnableFSDiscriminator
+                                   ? DIL->getDiscriminator()
+                                   : DIL->getBaseDiscriminator();
+      It->second = SampleLocation(DIL->getFilename(), DIL->getLine(),
+                                  Discriminator, getInlineStackHash(DIL));
+    }
+    return It->second;
+  }
+
+  DenseMap<const DILocation *, SampleLocation> LocationCache;
+  DenseMap<SampleLocation, Presence> Locations;
+};
+} // namespace
+
 bool BasicBlockMatchingAndInference::doInitialization(Module &M) {
   if (BasicBlockSectionAFDOProfile.empty())
     return false;
@@ -383,13 +469,17 @@ void BasicBlockMatchingAndInference::supplementWeightInfoWithAFDO(
     AFDOEntryWeight = Samples->getHeadSamplesEstimate();
   AFDOEntryWeight = std::max<uint64_t>(AFDOEntryWeight, 1);
 
+  AmbiguousSampleLocations Ambiguous(MF, MatchWeight.BlockWeights);
+  auto IsAmbiguous = [&](const MachineInstr &MI) {
+    return Ambiguous.contains(MI);
+  };
   for (const MachineBasicBlock &MBB : MF) {
     // Only supplement blocks without Propeller samples. Inference treats
     // every block in BlockWeights as known, so blocks without AFDO samples
     // must stay out of the map.
     if (MatchWeight.BlockWeights.lookup(&MBB) != 0)
       continue;
-    ErrorOr<uint64_t> AFDOWeight = AFDO->getBlockWeight(MBB);
+    ErrorOr<uint64_t> AFDOWeight = AFDO->getBlockWeight(MBB, IsAmbiguous);
     if (!AFDOWeight || *AFDOWeight == 0)
       continue;
     MatchWeight.BlockWeights[&MBB] = std::max<uint64_t>(
